@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>우심운까 | 간편 시작</title>
+    <style>
+.login-page {
+    --accent: #c2410c;
+    --accent-light: #fff1e6;
+    --ink: #242127;
+    --muted: #68616b;
+    margin: 0;
+    min-height: 100vh;
+    color: var(--ink);
+    background:
+        radial-gradient(circle at 12% 25%, #ffe5ce 0, transparent 40%),
+        linear-gradient(145deg, #fffaf5, #ffffff 75%);
+    font-family: system-ui, "Malgun Gothic", sans-serif;
+}
+.login-page * { box-sizing: border-box; }
+.login-page a { color: inherit; }
+.login-page button,
+.login-page input,
+.login-page select { font: inherit; }
+.login-page .login-header {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+.login-page .brand {
+    font-size: 24px;
+    font-weight: 900;
+    letter-spacing: -1px;
+    text-decoration: none;
+}
+.login-page .back-link {
+    color: var(--muted);
+    font-size: 14px;
+    text-underline-offset: 4px;
+}
+.login-page .login-layout {
+    max-width: 1060px;
+    margin: 32px auto;
+    padding: 0 24px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 60px;
+    align-items: center;
+}
+.login-page .intro-panel { min-width: 0; }
+.login-page .eyebrow {
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 800;
+}
+.login-page h1 {
+    margin: 20px 0;
+    font-size: clamp(34px, 4.2vw, 50px);
+    line-height: 1.3;
+    letter-spacing: -2px;
+}
+.login-page h1 span { color: var(--accent); }
+.login-page .intro-description {
+    color: var(--muted);
+    font-size: 17px;
+    line-height: 1.9;
+}
+.login-page .profile-preview {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-top: 30px;
+    padding: 22px;
+    background: #ffffffd9;
+    border: 1px solid #f4d9c5;
+    border-radius: 22px;
+}
+.login-page .preview-avatar {
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 58px;
+    height: 58px;
+    background: var(--accent-light);
+    border-radius: 18px;
+    font-size: 30px;
+}
+.login-page .profile-preview div { min-width: 0; }
+.login-page .profile-preview small {
+    color: var(--muted);
+    font-size: 12px;
+}
+.login-page .profile-preview strong {
+    display: block;
+    margin-top: 5px;
+    overflow-wrap: anywhere;
+}
+.login-page .profile-preview p {
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+.login-page .intro-note {
+    margin-top: 14px;
+    color: var(--muted);
+    font-size: 12px;
+}
+.login-page .login-card {
+    min-width: 0;
+    padding: 32px;
+    background: white;
+    border: 1px solid #eee4dc;
+    border-radius: 28px;
+    box-shadow: 0 22px 65px #60330e12;
+}
+.login-page .form-badge {
+    display: inline-block;
+    padding: 6px 12px;
+    background: var(--accent-light);
+    color: var(--accent);
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 800;
+}
+.login-page h2 {
+    margin: 18px 0 8px;
+    font-size: 23px;
+    letter-spacing: -1px;
+}
+.login-page .form-description {
+    margin: 0 0 28px;
+    color: var(--muted);
+    font-size: 14px;
+}
+.login-page .field-block { margin-bottom: 24px; }
+.login-page label {
+    display: block;
+    margin-bottom: 9px;
+    font-size: 14px;
+    font-weight: 750;
+}
+.login-page .required-label {
+    margin-left: 5px;
+    color: var(--accent);
+    font-size: 11px;
+}
+.login-page .profile-input {
+    width: 100%;
+    min-height: 52px;
+    padding: 12px 14px;
+    background: #fff;
+    border: 1px solid #d8d2ce;
+    border-radius: 12px;
+    color: var(--ink);
+    font-size: 16px;
+}
+.login-page .profile-input:focus {
+    border-color: var(--accent);
+    outline: 3px solid #ffdec5;
+    outline-offset: 2px;
+}
+.login-page .profile-input[aria-invalid="true"] { border-color: #b91c1c; }
+.login-page .field-help {
+    margin: 8px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.6;
+}
+.login-page .start-button {
+    width: 100%;
+    min-height: 56px;
+    padding: 14px 20px;
+    border: 0;
+    border-radius: 14px;
+    color: white;
+    background: var(--accent);
+    font-weight: 800;
+    cursor: pointer;
+    transition: background-color .15s, transform .15s;
+}
+.login-page .start-button:hover {
+    background: #9a3412;
+    transform: translateY(-1px);
+}
+.login-page .start-button:disabled {
+    opacity: .65;
+    cursor: wait;
+    transform: none;
+}
+.login-page a:focus-visible,
+.login-page button:focus-visible {
+    outline: 3px solid #c2410c;
+    outline-offset: 4px;
+}
+.login-page .auth-notice {
+    margin: 15px 0 0;
+    color: var(--muted);
+    text-align: center;
+    font-size: 12px;
+    line-height: 1.7;
+}
+.login-page .form-alert {
+    padding: 12px;
+    background: #fef2f2;
+    border-radius: 10px;
+    color: #991b1b;
+    font-size: 13px;
+    line-height: 1.6;
+}
+.login-page .errorlist {
+    margin: 8px 0 0;
+    padding-left: 20px;
+    color: #b91c1c;
+    font-size: 13px;
+    line-height: 1.6;
+}
+.login-page .clear-form {
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid #eee;
+    text-align: center;
+}
+.login-page .clear-button {
+    padding: 10px;
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+    text-decoration: underline;
+    text-underline-offset: 4px;
+    cursor: pointer;
+}
+.login-page .login-footer {
+    padding: 28px 20px;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+}
+@media (max-width: 800px) {
+    .login-page .login-layout {
+        grid-template-columns: 1fr;
+        max-width: 560px;
+        gap: 28px;
+        margin-top: 8px;
+    }
+    .login-page .intro-description br { display: none; }
+    .login-page .login-card { padding: 26px 22px; }
+    .login-page .profile-preview { margin-top: 20px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .login-page .start-button { transition: none; }
+}
+
+</style>
+</head>
+<body class="login-page" style="margin:0;min-height:100vh;">
+    <header class="login-header">
+        <a class="brand" href="./index.html">
+            우심운까 <span aria-hidden="true">🔥</span>
+        </a>
+        <a class="back-link" href="./recommend.html">추천 화면으로 →</a>
+    </header>
+
+    <main class="login-layout">
+        <section class="intro-panel" aria-labelledby="introTitle">
+            <p class="eyebrow">우리 심심한데 운동이나 할까?</p>
+            <h1 id="introTitle">
+                운동은 가볍게,<br>
+                <span>시작은 너답게.</span>
+            </h1>
+            <p class="intro-description">
+                실명은 필요 없어.<br>
+                운동할 때 불리고 싶은 이름과<br>
+                나이대, 사는 도시만 알려줘.
+            </p>
+
+            <div class="profile-preview">
+                <span class="preview-avatar" aria-hidden="true">🏃</span>
+                <div>
+                    <small>내 프로필 미리보기</small>
+                    <strong id="previewNickname">어떤 운동 친구인가요?</strong>
+                    <p>
+                        <span id="previewAge">나이대 선택</span>
+                        <span aria-hidden="true"> · </span>
+                        <span id="previewCity">사는 도시</span>
+                    </p>
+                </div>
+            </div>
+            <p class="intro-note">상세 주소나 생년월일은 입력하지 않아요.</p>
+        </section>
+
+        <section class="login-card" aria-labelledby="formTitle">
+            <span class="form-badge">간편 프로필</span>
+            <h2 id="formTitle">반가워! 먼저 너를 알려줘.</h2>
+            <p class="form-description">아래 세 가지만 입력하면 준비 끝.</p>
+
+            <form id="profileForm" action="./index.html">
+<div class="field-block"><label for="nickname">닉네임 <span class="required-label">필수</span></label><input class="profile-input" id="nickname" name="nickname" required maxlength="20" placeholder="운동할 때 불리고 싶은 이름" autocomplete="nickname"></div>
+<div class="field-block"><label for="age">나이대 <span class="required-label">필수</span></label><select class="profile-input" id="age" required><option value="">나이대 선택</option><option>10대 이하</option><option>20대</option><option>30대</option><option>40대</option><option>50대</option><option>60대 이상</option></select></div>
+<div class="field-block"><label for="city">사는 도시 <span class="required-label">필수</span></label><input class="profile-input" id="city" required maxlength="40" placeholder="예: 서울특별시 관악구" autocomplete="address-level2"><p class="field-help">시·도와 시·군·구까지만 입력해주세요.</p></div>
+<p id="profileStatus" role="status"></p>
+                <button id="startBtn" class="start-button" type="submit">
+                    이 정보로 시작하기 →
+                </button>
+                <p class="auth-notice">
+                    비밀번호 없는 체험용 프로필입니다.<br>
+                    이 브라우저에만 저장되며, 정식 계정은 생성되지 않아요.
+                </p>
+            </form>
+
+            <div class="clear-form"><button id="clearProfile" class="clear-button" type="button" hidden>저장한 프로필 지우기</button></div>
+        </section>
+    </main>
+
+    <footer class="login-footer">
+        오늘의 작은 시작, 우심운까.
+    </footer>
+<script>
+(function(){
+ const key='usimunkka.demo.profile.v1';
+ function profile(){if(window.USIMUNKKA_EMBED)return window.USIMUNKKA_EMBED.profile||null;try{return JSON.parse(localStorage.getItem(key))}catch{return null}}
+ function save(value){if(window.USIMUNKKA_EMBED){window.USIMUNKKA_EMBED.profile=value;parent.postMessage({type:'usimunkka-profile',profile:value},'*');return true}try{value?localStorage.setItem(key,JSON.stringify(value)):localStorage.removeItem(key);return true}catch{return false}}
+ function go(path){if(window.USIMUNKKA_EMBED){parent.postMessage({type:'usimunkka-route',path},'*')}else location.href=path}
+ function escape(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+ window.UsimApp={profile,save,go,escape,params:()=>new URLSearchParams(window.USIMUNKKA_EMBED?.query||location.search)};
+ document.addEventListener('click',e=>{const a=e.target.closest('a[href]');if(!a||e.ctrlKey||e.metaKey)return;const path=a.getAttribute('href');if(window.USIMUNKKA_EMBED&&/^\.\/(index|login|recommend)\.html/.test(path)){e.preventDefault();go(path)}});
+})();
+
+</script><script>
+const form=document.getElementById('profileForm');
+const nickname=document.getElementById('nickname'),age=document.getElementById('age'),city=document.getElementById('city'),status=document.getElementById('profileStatus');
+const saved=UsimApp.profile();if(saved){nickname.value=saved.nickname;age.value=saved.age;city.value=saved.city;document.getElementById('clearProfile').hidden=false}
+function refresh(){document.getElementById('previewNickname').textContent=nickname.value.trim()||'어떤 운동 친구인가요?';document.getElementById('previewAge').textContent=age.value||'나이대 선택';document.getElementById('previewCity').textContent=city.value.trim()||'사는 도시'}
+form.addEventListener('input',refresh);refresh();
+form.addEventListener('submit',e=>{e.preventDefault();if(!form.reportValidity())return;
+ const n=nickname.value.trim(),c=city.value.trim();if(!n||!c||/[<>]/.test(n+c)){status.textContent='닉네임과 도시를 확인해주세요. 꺾쇠 기호는 사용할 수 없어요.';return}
+ const aliases={'서울':'서울특별시','경기':'경기도','인천':'인천광역시','강원':'강원특별자치도','충북':'충청북도','충남':'충청남도','대전':'대전광역시','세종':'세종특별자치시','전북':'전북특별자치도','전남':'전라남도','광주':'광주광역시','경북':'경상북도','경남':'경상남도','대구':'대구광역시','울산':'울산광역시','부산':'부산광역시','제주':'제주특별자치도'};
+ const first=c.split(/\s+/)[0],province=aliases[first]||first;
+ const profile={nickname:n,age:age.value,city:c,address:c,province,region_name:c.split(/\s+/).at(-1)};
+ if(!UsimApp.save(profile)){status.textContent='프로필을 저장할 수 없어요. 브라우저의 저장소 설정을 확인해주세요.';return}
+ const next=UsimApp.params().get('next');UsimApp.go(next&&/^(index|recommend)\.html(\?[^#]*)?$/.test(next)?'./'+next:'./index.html');
+});
+document.getElementById('clearProfile').addEventListener('click',()=>{if(!UsimApp.save(null)){status.textContent='프로필을 지우지 못했어요.';return}try{localStorage.removeItem('usimunkka.mock.session.userId')}catch{}form.reset();refresh();document.getElementById('clearProfile').hidden=true;status.textContent='저장된 체험 프로필을 지웠어요.'});
+
+</script>
+</body>
+</html>
