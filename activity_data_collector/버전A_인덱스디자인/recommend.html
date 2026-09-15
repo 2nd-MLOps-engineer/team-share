@@ -1,0 +1,1282 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>우심운까 - 오늘 뭐하고 운동할까?</title>
+
+    <style>
+/* =========================
+   기본 설정 (index.html 디자인 토큰과 통일)
+========================= */
+
+* {
+    box-sizing: border-box;
+}
+
+html {
+    scroll-behavior: smooth;
+}
+
+:root {
+    --lime: #c9b7ff;
+    --green: #71d7c8;
+    --pink: #ff91ac;
+    --yellow: #f5c96f;
+    --blue: #83c9f4;
+    --text: #3f385c;
+    --muted: #7f769b;
+    --line: rgba(112, 93, 154, .14);
+    --shadow: 0 28px 80px rgba(98, 83, 146, .16), 0 2px 8px rgba(113, 93, 162, .06);
+    --radius: 24px;
+}
+
+body {
+    margin: 0;
+
+    font-family:
+        Pretendard,
+        "Noto Sans KR",
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+
+    color: var(--text);
+    position: relative;
+
+    background:
+        radial-gradient(circle at 8% 8%, rgba(255, 191, 220, .5), transparent 28%),
+        radial-gradient(circle at 92% 16%, rgba(179, 220, 255, .6), transparent 31%),
+        radial-gradient(circle at 30% 92%, rgba(196, 185, 255, .42), transparent 34%),
+        linear-gradient(145deg, #fffafd 0%, #f7f3ff 42%, #eef8ff 100%);
+
+    min-height: 100vh;
+}
+
+
+/* =========================
+   Header
+========================= */
+
+.site-header {
+    width: 100%;
+
+    border-bottom: 1px solid var(--line);
+
+    background-color: rgba(255, 252, 255, .72);
+    backdrop-filter: blur(18px);
+    box-shadow: 0 8px 30px rgba(108, 92, 153, .06);
+
+    position: sticky;
+
+    top: 0;
+
+    z-index: 100;
+}
+
+
+.header-inner {
+    max-width: 1100px;
+
+    height: 68px;
+
+    margin: 0 auto;
+
+    padding: 0 24px;
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+}
+
+
+.logo {
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+
+    color: #46405f;
+
+    font-size: 18px;
+
+    font-weight: 900;
+
+    letter-spacing: -1px;
+}
+
+.logo::before {
+    content: "우";
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 11px;
+    background: linear-gradient(145deg, #c9b7ff, #91d9f7);
+    color: #4b4268;
+    font-size: 15px;
+    font-weight: 900;
+    box-shadow: 0 8px 20px rgba(164, 141, 229, .25);
+}
+
+
+.logo-fire {
+    display: inline-block;
+
+    margin-left: 3px;
+}
+
+
+.nav-text {
+    font-size: 14px;
+
+    font-weight: 700;
+
+    color: var(--muted);
+}
+
+
+/* =========================
+   전체 페이지
+========================= */
+
+.page-wrapper {
+    width: 100%;
+
+    max-width: 940px;
+
+    margin: 0 auto;
+
+    padding: 72px 24px 100px;
+}
+
+
+/* =========================
+   Hero
+========================= */
+
+.hero-section {
+    text-align: center;
+
+    margin-bottom: 48px;
+}
+
+
+.hero-badge {
+    display: inline-block;
+
+    padding: 7px 13px;
+
+    margin-bottom: 18px;
+
+    border-radius: 999px;
+
+    background: rgba(255,255,255,.56);
+    border: 1px solid rgba(173, 136, 212, .22);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.85);
+
+    color: #8d6eaf;
+
+    font-size: 12px;
+
+    font-weight: 900;
+
+    letter-spacing: 1px;
+}
+
+
+.hero-title {
+    margin: 0;
+
+    font-size: 44px;
+
+    line-height: 1.25;
+
+    letter-spacing: -2px;
+
+    font-weight: 900;
+
+    color: #46405f;
+    text-shadow: 0 2px 0 rgba(255,255,255,.8);
+}
+
+
+.hero-description {
+    margin: 18px 0 0;
+
+    color: var(--muted);
+
+    font-size: 18px;
+
+    line-height: 1.7;
+}
+
+
+.hero-description strong {
+    color: #7864b4;
+}
+
+
+/* =========================
+   입력 카드
+========================= */
+
+.recommend-card {
+    background: linear-gradient(145deg, rgba(255,255,255,.76), rgba(250,247,255,.58));
+
+    border: 1px solid var(--line);
+
+    border-radius: 28px;
+
+    padding: 36px;
+
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(28px) saturate(1.18);
+}
+
+
+.card-header {
+    display: flex;
+
+    align-items: center;
+
+    justify-content: space-between;
+
+    padding-bottom: 28px;
+
+    border-bottom: 1px solid var(--line);
+}
+
+
+.step-label {
+    display: inline-block;
+
+    margin-bottom: 7px;
+
+    color: #9b78ca;
+
+    font-size: 11px;
+
+    font-weight: 900;
+
+    letter-spacing: 1.4px;
+}
+
+
+.card-header h2,
+.result-heading h2 {
+    margin: 0;
+
+    font-size: 26px;
+
+    letter-spacing: -1px;
+    color: #4d4467;
+}
+
+
+.card-header-icon {
+    width: 56px;
+
+    height: 56px;
+
+    border-radius: 18px;
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    background: radial-gradient(circle, rgba(231,219,255,.92), rgba(232,246,255,.48) 55%, transparent 70%);
+
+    font-size: 28px;
+}
+
+
+/* =========================
+   Form
+========================= */
+
+.form-section {
+    padding: 30px 0;
+
+    border-bottom: 1px solid rgba(112, 93, 154, .09);
+}
+
+
+.form-title {
+    display: flex;
+
+    align-items: center;
+
+    gap: 13px;
+
+    margin-bottom: 18px;
+}
+
+
+.form-icon {
+    width: 42px;
+
+    height: 42px;
+
+    border-radius: 13px;
+
+    background-color: rgba(255,255,255,.6);
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    font-size: 20px;
+}
+
+
+.form-title h3 {
+    margin: 0 0 4px;
+
+    font-size: 16px;
+    color: #4d4467;
+}
+
+
+.form-title p {
+    margin: 0;
+
+    color: var(--muted);
+
+    font-size: 13px;
+}
+
+
+/* =========================
+   위치 입력
+========================= */
+
+.location-actions {
+    display: flex;
+
+    align-items: center;
+
+    gap: 12px;
+}
+
+
+.or-text {
+    color: var(--muted);
+
+    font-size: 12px;
+
+    white-space: nowrap;
+}
+
+
+/* =========================
+   Input
+========================= */
+
+.text-input,
+.select-input {
+    width: 100%;
+
+    min-height: 52px;
+
+    padding: 0 16px;
+
+    border: 1px solid rgba(116, 95, 156, .15);
+
+    border-radius: 13px;
+
+    background-color: rgba(255,255,255,.82);
+
+    color: #564c6b;
+
+    font-size: 15px;
+
+    outline: none;
+
+    transition:
+        border-color 0.2s,
+        box-shadow 0.2s;
+}
+
+
+.text-input:focus,
+.select-input:focus {
+    border-color: #9cccf0;
+
+    box-shadow: 0 0 0 4px rgba(156, 204, 240, .22);
+}
+
+
+/* =========================
+   운동 선택
+========================= */
+
+.sports-grid {
+    display: grid;
+
+    grid-template-columns:
+        repeat(3, 1fr);
+
+    gap: 12px;
+}
+
+
+.sport-option {
+    position: relative;
+
+    cursor: pointer;
+}
+
+
+.sport-option input {
+    position: absolute;
+
+    opacity: 0;
+
+    pointer-events: none;
+}
+
+
+.sport-content {
+    min-height: 96px;
+
+    border: 1px solid rgba(116, 95, 156, .15);
+
+    border-radius: 16px;
+
+    display: flex;
+
+    flex-direction: column;
+
+    align-items: center;
+
+    justify-content: center;
+
+    gap: 7px;
+
+    background-color: rgba(255,255,255,.68);
+
+    transition:
+        transform 0.2s,
+        border-color 0.2s,
+        background-color 0.2s,
+        box-shadow 0.2s;
+}
+
+
+.sport-option:hover .sport-content {
+    transform: translateY(-2px);
+
+    border-color: #c6a9f0;
+}
+
+
+.sport-option input:checked + .sport-content {
+    border-color: rgba(159, 126, 213, .32);
+
+    background: linear-gradient(115deg, rgba(220,207,255,.72), rgba(216,241,255,.6), rgba(255,220,234,.5));
+
+    box-shadow: 0 9px 24px rgba(125,104,174,.12), inset 0 1px 0 rgba(255,255,255,.9);
+}
+
+
+.sport-emoji {
+    font-size: 27px;
+}
+
+
+.sport-name {
+    font-size: 14px;
+
+    font-weight: 800;
+    color: #4d4467;
+}
+
+
+/* =========================
+   2열 입력
+========================= */
+
+.two-column {
+    display: grid;
+
+    grid-template-columns:
+        1fr 1fr;
+
+    gap: 28px;
+}
+
+
+/* =========================
+   버튼
+========================= */
+
+.secondary-button {
+    min-height: 52px;
+
+    padding: 0 18px;
+
+    border: 1px solid rgba(173, 136, 212, .22);
+
+    border-radius: 13px;
+
+    background: rgba(255,255,255,.56);
+
+    color: #8d6eaf;
+
+    font-size: 14px;
+
+    font-weight: 800;
+
+    cursor: pointer;
+
+    white-space: nowrap;
+
+    transition:
+        transform 0.2s,
+        background-color 0.2s;
+}
+
+
+.secondary-button:hover {
+    transform: translateY(-1px);
+
+    background-color: rgba(255,255,255,.85);
+}
+
+
+.submit-section {
+    padding-top: 32px;
+
+    text-align: center;
+}
+
+
+.primary-button {
+    width: 100%;
+
+    min-height: 62px;
+
+    padding: 0 24px;
+
+    border: none;
+
+    border-radius: 16px;
+
+    background: linear-gradient(135deg, #bba4eb, #92cff0 55%, #efb2cb);
+
+    color: #423858;
+
+    font-size: 17px;
+
+    font-weight: 900;
+
+    cursor: pointer;
+
+    box-shadow: 0 13px 32px rgba(134,105,183,.2), inset 0 1px 0 rgba(255,255,255,.65);
+
+    transition:
+        transform 0.2s,
+        box-shadow 0.2s;
+}
+
+
+.primary-button:hover {
+    transform: translateY(-2px);
+
+    box-shadow: 0 17px 38px rgba(134,105,183,.27);
+}
+
+
+.primary-button:active {
+    transform: translateY(0);
+}
+
+
+.arrow {
+    margin-left: 6px;
+}
+
+
+.submit-description {
+    margin: 13px 0 0;
+
+    color: var(--muted);
+
+    font-size: 12px;
+}
+
+
+/* =========================
+   추천 결과
+========================= */
+
+.result-section {
+    margin-top: 64px;
+}
+
+
+.result-heading {
+    margin-bottom: 20px;
+}
+
+
+#result {
+    display: grid;
+
+    gap: 18px;
+}
+
+
+.result-placeholder {
+    padding: 54px 20px;
+
+    text-align: center;
+
+    border: 1px dashed rgba(159, 126, 213, .3);
+
+    border-radius: 24px;
+
+    background-color: rgba(255, 255, 255, .55);
+}
+
+
+.placeholder-icon {
+    font-size: 42px;
+
+    margin-bottom: 15px;
+}
+
+
+.result-placeholder h3 {
+    margin: 0 0 9px;
+
+    font-size: 18px;
+    color: #4d4467;
+}
+
+
+.result-placeholder p {
+    margin: 0;
+
+    color: var(--muted);
+
+    line-height: 1.6;
+
+    font-size: 14px;
+}
+
+
+/* =========================
+   JS가 생성하는 추천 카드
+========================= */
+
+.recommend-card-item,
+.recommend-card {
+    transition: transform 0.2s;
+}
+
+
+#result .recommend-card {
+    padding: 28px;
+
+    border-radius: 22px;
+
+    box-shadow: 0 20px 45px rgba(116,94,160,.14), inset 0 1px 0 #fff;
+}
+
+
+#result .recommend-card:hover {
+    transform: translateY(-3px);
+}
+
+
+#result .recommend-card h2 {
+    margin-top: 12px;
+
+    font-size: 21px;
+    color: #4d4467;
+}
+
+
+#result .recommend-card ul {
+    padding-left: 20px;
+
+    color: #6e617f;
+
+    line-height: 1.8;
+}
+
+
+/* =========================
+   로딩 / 오류
+========================= */
+
+.loading,
+.error,
+.empty {
+    padding: 38px;
+
+    text-align: center;
+
+    border-radius: 20px;
+
+    background: rgba(255,255,255,.68);
+
+    border: 1px solid var(--line);
+}
+
+
+.loading {
+    color: #8568ba;
+
+    font-weight: 800;
+}
+
+
+.error {
+    color: #d86d82;
+}
+
+
+/* =========================
+   Footer
+========================= */
+
+.site-footer {
+    padding: 32px 20px;
+
+    text-align: center;
+
+    border-top: 1px solid rgba(112, 93, 154, .1);
+
+    color: var(--muted);
+
+    font-size: 13px;
+}
+
+
+.site-footer strong {
+    color: #635786;
+}
+
+
+/* =========================
+   반응형
+========================= */
+
+@media (max-width: 700px) {
+
+    .page-wrapper {
+        padding:
+            46px 16px 70px;
+    }
+
+
+    .header-inner {
+        padding:
+            0 16px;
+    }
+
+
+    .hero-title {
+        font-size: 34px;
+    }
+
+
+    .hero-description {
+        font-size: 15px;
+    }
+
+
+    .recommend-card {
+        padding: 24px 18px;
+
+        border-radius: 22px;
+    }
+
+
+    .sports-grid {
+        grid-template-columns:
+            1fr;
+    }
+
+
+    .two-column {
+        grid-template-columns:
+            1fr;
+    }
+
+
+    .location-actions {
+        flex-direction: column;
+
+        align-items: stretch;
+    }
+
+
+    .or-text {
+        text-align: center;
+    }
+
+
+    .secondary-button {
+        width: 100%;
+    }
+
+}
+</style>
+</head>
+
+<body>
+
+    <!-- 상단 헤더 -->
+    <header class="site-header">
+
+        <div class="header-inner">
+
+            <a href="./index.html" class="logo">
+                우심운까
+                <span class="logo-fire">🔥</span>
+            </a>
+
+            <nav class="header-nav">
+                <span class="nav-text">
+                    오늘도 운동 중
+                </span>
+            </nav>
+
+        </div>
+
+    </header>
+
+
+    <!-- 전체 페이지 -->
+    <main class="page-wrapper">
+
+        <!-- 소개 영역 -->
+        <section class="hero-section">
+
+            <div class="hero-badge">
+                TODAY'S MISSION
+            </div>
+
+            <h1 class="hero-title">
+                오늘 운동 안 할 거야?
+                <span>👀</span>
+            </h1>
+
+            <p class="hero-description">
+                핑계 댈 시간까지 계산해서
+                <strong>지금 갈 수 있는 운동</strong>만 찾아줄게.
+            </p>
+
+        </section>
+
+
+        <p role="status" style="padding:14px 18px;border-radius:14px;background:rgba(245,201,111,.18);color:#7a5f21;line-height:1.6;">운동 추천 화면 미리보기입니다. 현재 위치 사용과 추천 결과 조회 기능은 연결 준비 중입니다.</p>
+
+        <!-- 운동 조건 입력 카드 -->
+        <section class="recommend-card">
+
+            <div class="card-header">
+
+                <div>
+                    <span class="step-label">
+                        STEP 01
+                    </span>
+
+                    <h2>
+                        지금 상황을 알려줘
+                    </h2>
+                </div>
+
+                <div class="card-header-icon">
+                    🏃
+                </div>
+
+            </div>
+
+
+            <!-- 위치 -->
+            <div class="form-section">
+
+                <div class="form-title">
+
+                    <span class="form-icon">
+                        📍
+                    </span>
+
+                    <div>
+                        <h3>출발 위치</h3>
+
+                        <p>
+                            지금 어디에 있어?
+                        </p>
+                    </div>
+
+                </div>
+
+
+                <div class="location-actions">
+
+                    <button
+                        id="locationBtn" disabled title="현재 위치 기능 연결 예정"
+                        type="button"
+                        class="secondary-button"
+                    >
+                        <span>⌖</span>
+                        현재 위치 사용
+                    </button>
+
+                    <div class="or-text">
+                        또는
+                    </div>
+
+                    <input
+                        type="text"
+                        id="manualLocation"
+                        class="text-input"
+                        placeholder="예: 서울 관악구"
+                    >
+
+                </div>
+
+            </div>
+
+
+            <!-- 사용 가능 시간 -->
+            <div class="form-section">
+
+                <div class="form-title">
+
+                    <span class="form-icon">
+                        ⏰
+                    </span>
+
+                    <div>
+                        <h3>사용 가능한 시간</h3>
+
+                        <p>
+                            이동시간까지 포함한 전체 시간이야.
+                        </p>
+                    </div>
+
+                </div>
+
+
+                <select
+                    id="availableMinutes"
+                    class="select-input"
+                >
+                    <option value="30">
+                        30분 - 빠르게 운동
+                    </option>
+
+                    <option value="60">
+                        60분 - 가볍게 한 판
+                    </option>
+
+                    <option value="90" selected>
+                        90분 - 제대로 운동
+                    </option>
+
+                    <option value="120">
+                        120분 - 여유롭게 운동
+                    </option>
+                </select>
+
+            </div>
+
+
+            <!-- 운동 종목 -->
+            <div class="form-section">
+
+                <div class="form-title">
+
+                    <span class="form-icon">
+                        💪
+                    </span>
+
+                    <div>
+                        <h3>하고 싶은 운동</h3>
+
+                        <p>
+                            여러 개 골라도 괜찮아.
+                        </p>
+                    </div>
+
+                </div>
+
+
+                <div class="sports-grid">
+
+                    <label class="sport-option">
+
+                        <input
+                            type="checkbox"
+                            name="sport"
+                            value="RUNNING"
+                        >
+
+                        <span class="sport-content">
+                            <span class="sport-emoji">
+                                🏃
+                            </span>
+
+                            <span class="sport-name">
+                                러닝
+                            </span>
+                        </span>
+
+                    </label>
+
+
+                    <label class="sport-option">
+
+                        <input
+                            type="checkbox"
+                            name="sport"
+                            value="SWIMMING"
+                        >
+
+                        <span class="sport-content">
+                            <span class="sport-emoji">
+                                🏊
+                            </span>
+
+                            <span class="sport-name">
+                                수영
+                            </span>
+                        </span>
+
+                    </label>
+
+
+                    <label class="sport-option">
+
+                        <input
+                            type="checkbox"
+                            name="sport"
+                            value="BADMINTON"
+                        >
+
+                        <span class="sport-content">
+                            <span class="sport-emoji">
+                                🏸
+                            </span>
+
+                            <span class="sport-name">
+                                배드민턴
+                            </span>
+                        </span>
+
+                    </label>
+
+                </div>
+
+            </div>
+
+
+            <!-- 이동조건 -->
+            <div class="form-section two-column">
+
+                <div>
+
+                    <div class="form-title">
+
+                        <span class="form-icon">
+                            🚶
+                        </span>
+
+                        <div>
+                            <h3>최대 이동시간</h3>
+
+                            <p>
+                                얼마나 이동할 수 있어?
+                            </p>
+                        </div>
+
+                    </div>
+
+
+                    <select
+                        id="travelMinutes"
+                        class="select-input"
+                    >
+                        <option value="10">
+                            10분 이내
+                        </option>
+
+                        <option value="20" selected>
+                            20분 이내
+                        </option>
+
+                        <option value="30">
+                            30분 이내
+                        </option>
+                    </select>
+
+                </div>
+
+
+                <div>
+
+                    <div class="form-title">
+
+                        <span class="form-icon">
+                            🚇
+                        </span>
+
+                        <div>
+                            <h3>이동수단</h3>
+
+                            <p>
+                                어떻게 갈까?
+                            </p>
+                        </div>
+
+                    </div>
+
+
+                    <select
+                        id="transport"
+                        class="select-input"
+                    >
+                        <option value="WALK">
+                            🚶 도보
+                        </option>
+
+                        <option value="BICYCLE">
+                            🚲 자전거
+                        </option>
+
+                        <option value="TRANSIT">
+                            🚇 대중교통
+                        </option>
+                    </select>
+
+                </div>
+
+            </div>
+
+
+            <!-- 추천 버튼 -->
+            <div class="submit-section">
+
+                <button
+                    id="recommendBtn" type="button"
+                    type="button"
+                    class="primary-button"
+                >
+                    <span>
+                        🔥
+                    </span>
+
+                    지금 할 운동 찾아줘
+
+                    <span class="arrow">
+                        →
+                    </span>
+                </button>
+
+                <p class="submit-description">
+                    이동시간과 실제 운동 가능시간을 함께 고려할게.
+                </p>
+
+            </div>
+
+        </section>
+
+
+        <!-- 추천 결과 제목 -->
+        <section class="result-section">
+
+            <div class="result-heading">
+
+                <div>
+                    <span class="step-label">
+                        STEP 02
+                    </span>
+
+                    <h2>
+                        지금 갈 수 있는 곳
+                    </h2>
+                </div>
+
+            </div>
+
+
+            <!-- JS 추천 결과 출력 위치 -->
+            <div id="result">
+
+                <div class="result-placeholder">
+
+                    <div class="placeholder-icon">
+                        🏆
+                    </div>
+
+                    <h3>
+                        아직 추천을 시작하지 않았어요.
+                    </h3>
+
+                    <p>
+                        위에서 운동 조건을 선택하면
+                        지금 갈 수 있는 곳을 찾아드릴게요.
+                    </p>
+
+                </div>
+
+            </div>
+
+        </section>
+
+    </main>
+
+
+    <footer class="site-footer">
+
+        <p>
+            우리 심심한데 운동이나 할까?
+            <strong>우심운까 🔥</strong>
+        </p>
+
+    </footer>
+
+
+
+
+<script>
+(async function(){
+  const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const profile=JSON.parse(localStorage.getItem('usimunkka.demo.profile.v1')||'null');
+  const region=profile?.city||profile?.address;
+  if(!region){location.href='./login-독립실행.html?next=recommend.html';return}
+  document.querySelector('.hero-description').innerHTML=`<strong>${esc(profile.nickname)}</strong>님의 <strong>${esc(region)}</strong> 기준 추천 결과입니다.`;
+  document.getElementById('manualLocation').value=region;
+  const result=document.getElementById('result');
+  result.innerHTML='<div class="result-placeholder"><h3>사전 계산 결과를 불러오는 중입니다.</h3><p>로그인할 때 계산을 완료했으므로 잠시 후 바로 표시됩니다.</p></div>';
+  try{
+    const response=await fetch('/api/recommendation?region='+encodeURIComponent(region));
+    const data=await response.json();
+    if(!response.ok) throw new Error(data.error||'결과 없음');
+    const air=data.air?.measurements?.response?.body?.items?.item?.[0]||{};
+    const cards=data.facilities.map(x=>`<article class="recommend-card-item"><h3>${esc(x.facility_name)}</h3><p>${esc(x.facility_type||'운동시설')} · ${esc(x.environment==='indoor'?'실내':x.environment==='outdoor'?'실외':'실내외 미상')}</p><p>${esc(x.address)} · 약 ${x.distance_km??'-'}km</p></article>`).join('');
+    result.innerHTML=`<div class="recommend-card-item"><h3>${esc(data.recommendation)}</h3><p>${esc(data.recommendation_reason)}</p><p>PM10 ${esc(air.pm10Value||'-')} · PM2.5 ${esc(air.pm25Value||'-')}</p></div>${cards||'<div class="recommend-card-item"><h3>시설 정보가 없습니다.</h3><p>선택한 지역의 데이터를 확인하지 못했습니다.</p></div>'}`;
+  }catch(error){result.innerHTML=`<div class="recommend-card-item"><h3>추천 결과를 불러오지 못했습니다.</h3><p>${esc(error.message)}</p></div>`}
+})();
+</script>
+</body>
+</html>
