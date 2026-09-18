@@ -1,0 +1,21 @@
+{% load static %}
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>우심운까 · 로그인</title>
+  <link rel="stylesheet" href="{% static 'assets/css/base.css' %}">
+  <link rel="stylesheet" href="{% static 'assets/css/signup.css' %}">
+  <style>.login-card{width:min(500px,100%)}.login-message{margin:0;color:var(--brick);font-size:12px;font-weight:800}.login-signup{margin:24px 0 0;padding-top:18px;border-top:1px solid #d8cdbb;text-align:center;color:#70695e;font-size:12px}.login-signup a{color:var(--brick);font-weight:900;text-decoration:underline;text-underline-offset:3px}</style>
+</head>
+<body><main class="signup-page"><section class="signup-card login-card">
+  <header class="signup-heading"><div><p class="section-kicker">OUR MOVE CLUB</p><h1>로그인</h1><p>다시 운동을 시작해볼까요?</p></div><span class="signup-stamp">WELCOME BACK</span></header>
+  <form class="signup-form" method="post">{% csrf_token %}
+    <div class="signup-field"><label for="nickname">닉네임</label><input id="nickname" name="nickname" type="text" maxlength="20" autocomplete="username" required>{% for error in form.nickname.errors %}<small class="field-error">{{ error }}</small>{% endfor %}</div>
+    <div class="signup-field"><label for="password">비밀번호</label><input id="password" name="password" type="password" maxlength="128" autocomplete="current-password" required>{% for error in form.password.errors %}<small class="field-error">{{ error }}</small>{% endfor %}</div>
+    {% if error %}<p class="login-message">{{ error }}</p>{% endif %}
+    <button class="signup-submit" type="submit">로그인</button>
+  </form>
+  <p class="login-signup">아직 회원가입을 하지 않으셨나요? <a href="{% url 'signup' %}">회원가입하기</a></p>
+  <a class="signup-back" href="{% url 'welcome' %}">← 시작 화면으로</a>
+</section></main></body></html>

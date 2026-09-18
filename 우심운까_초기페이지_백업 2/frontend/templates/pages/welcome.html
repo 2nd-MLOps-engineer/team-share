@@ -1,0 +1,30 @@
+{% load static %}
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>우심운까 · 같이 운동하자</title>
+  <link rel="stylesheet" href="{% static 'assets/css/base.css' %}">
+  <link rel="stylesheet" href="{% static 'assets/css/welcome.css' %}">
+</head>
+<body>
+  <main class="welcome-page">
+    <section class="welcome-shell" aria-labelledby="welcome-title">
+      <div class="welcome-brand"><span class="welcome-mark">우</span><div><strong>우심운까</strong><small>OUR MOVE CLUB</small></div></div>
+      <p class="welcome-kicker">GOOD MOVE · GOOD DAY</p>
+      <h1 class="welcome-title" id="welcome-title">같이 운동 하자</h1>
+      <p class="welcome-subtitle">가볍게 시작하는 우리 동네 운동 친구</p>
+      <div class="mobi-welcome-stage">
+        <div class="speech-bubble">같이 운동 하자</div>
+        <div class="mobi-welcome" role="img" aria-label="실내 자전거를 타며 손을 흔드는 캐릭터"></div>
+      </div>
+      <div class="welcome-actions">
+        <a class="welcome-button signup" href="{% url 'signup' %}">회원가입</a>
+        <a class="welcome-button login" href="{% url 'login' %}">로그인</a>
+      </div>
+      <p class="welcome-note">START SMALL · MOVE TOGETHER</p>
+    </section>
+  </main>
+</body>
+</html>
