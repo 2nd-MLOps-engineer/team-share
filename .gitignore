@@ -1,0 +1,14 @@
+**/.env
+**/__pycache__/
+*.py[cod]
+/M3_data_pipeline/.test_deps/
+
+# 수집 결과와 실행 로그/브라우저 프로필
+/data/raw/
+/data/processed/
+/data/logs/
+/data/browser_profiles/
+/M3_data_pipeline/data/raw/
+/M3_data_pipeline/data/processed/
+/M3_data_pipeline/data/logs/
+/data/db_backup/
