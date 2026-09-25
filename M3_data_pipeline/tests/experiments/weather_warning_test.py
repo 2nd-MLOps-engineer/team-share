@@ -7,10 +7,10 @@ from urllib.parse import unquote
 from dotenv import load_dotenv
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parents[2]
 
 ENV_PATH = (
-    PROJECT_ROOT
+    PROJECT_DIR
     / "collector"
     / ".env"
 )

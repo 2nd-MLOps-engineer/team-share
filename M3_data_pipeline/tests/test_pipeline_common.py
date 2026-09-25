@@ -21,10 +21,10 @@ class NormalizeMissingValuesTest(unittest.TestCase):
 
         result = normalize_missing_values(source)
 
-        self.assertIsNone(result.loc[0, "value"])
-        self.assertIsNone(result.loc[1, "value"])
-        self.assertIsNone(result.loc[2, "value"])
-        self.assertIsNone(result.loc[3, "value"])
+        self.assertTrue(pd.isna(result.loc[0, "value"]))
+        self.assertTrue(pd.isna(result.loc[1, "value"]))
+        self.assertTrue(pd.isna(result.loc[2, "value"]))
+        self.assertTrue(pd.isna(result.loc[3, "value"]))
         self.assertEqual(result.loc[4, "value"], "valid")
         self.assertEqual(result.loc[0, "number"], "0")
 
