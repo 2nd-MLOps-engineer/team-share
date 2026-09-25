@@ -7,7 +7,7 @@ import pandas as pd
 # ==================================================
 
 # team-share 폴더
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 INPUT_PATH = (
     PROJECT_ROOT

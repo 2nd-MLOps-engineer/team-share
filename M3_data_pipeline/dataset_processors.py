@@ -997,13 +997,39 @@ def process_weather(
         frame,
         float_columns=(
             "obsrValue",
-            "fcstValue",
         ),
         integer_columns=(
             "nx",
             "ny",
         ),
     )
+
+    if "fcstValue" in frame.columns:
+        values = (
+            frame["fcstValue"]
+            .astype("string")
+            .str.replace(",", "", regex=False)
+            .str.strip()
+        )
+
+        numeric_values = pd.to_numeric(
+            values,
+            errors="coerce",
+        ).astype("Float64")
+
+        # RN1은 "강수없음", "1.0mm 미만"처럼 숫자가 아닌
+        # 강수량 표현을 사용하므로 원문 문자열을 보존한다.
+        rain_category = (
+            frame["category"].eq("RN1").fillna(False)
+            if "category" in frame.columns
+            else pd.Series(False, index=frame.index)
+        )
+
+        converted_values = numeric_values.astype("object")
+        converted_values.loc[rain_category] = values.loc[
+            rain_category
+        ]
+        frame["fcstValue"] = converted_values
 
     convert_datetimes(
         frame,
@@ -1216,6 +1242,24 @@ def process_bicycle_accident(
 ) -> pd.DataFrame:
 
     frame = normalize_nulls(raw)
+
+    coordinate_renames = {
+        raw_name: standard_name
+        for raw_name, standard_name in (
+            ("lo_crd", "longitude"),
+            ("la_crd", "latitude"),
+        )
+        if (
+            raw_name in frame.columns
+            and standard_name not in frame.columns
+        )
+    }
+
+    if coordinate_renames:
+        frame.rename(
+            columns=coordinate_renames,
+            inplace=True,
+        )
 
     convert_numeric(
         frame,

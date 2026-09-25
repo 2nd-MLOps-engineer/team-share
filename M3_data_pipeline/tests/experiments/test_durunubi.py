@@ -11,21 +11,20 @@ from dotenv import load_dotenv
 # 1. 경로 / ENV
 # ============================================================
 
-# 현재 파일:
-# D:\BAIK\projects\team-share\M3_data_pipeline\test_durunubi.py
-
-CURRENT_DIR = Path(__file__).resolve().parent
+# 현재 파일은 M3_data_pipeline/tests/experiments 아래에 있다.
+EXPERIMENT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parents[2]
 
 # 실제 ENV:
 # D:\BAIK\projects\team-share\M3_data_pipeline\collector\.env
 
-ENV_PATH = CURRENT_DIR / "collector" / ".env"
+ENV_PATH = PROJECT_DIR / "collector" / ".env"
 
 print("=" * 70)
 print("두루누비 API 테스트")
 print("=" * 70)
 print("실행 파일 :", Path(__file__).resolve())
-print("현재 폴더 :", CURRENT_DIR)
+print("현재 폴더 :", EXPERIMENT_DIR)
 print("ENV 경로  :", ENV_PATH)
 print("ENV 존재  :", ENV_PATH.exists())
 

@@ -15,11 +15,11 @@ from dotenv import load_dotenv
 
 # ------------------------------------------------------------
 # 1. .env 위치
-# tago_bus.py와 .env가 같은 collector 폴더에 있음
+# 실제 환경변수 파일은 프로젝트의 collector 폴더에 있음
 # ------------------------------------------------------------
 
-BASE_DIR = Path(__file__).resolve().parent
-ENV_PATH = BASE_DIR / ".env"
+PROJECT_DIR = Path(__file__).resolve().parents[2]
+ENV_PATH = PROJECT_DIR / "collector" / ".env"
 
 print("=" * 60)
 print("TAGO 버스도착정보 API 테스트")

@@ -97,7 +97,7 @@ JOB_SPECS: dict[str, JobSpec] = {
         (OutputSpec("data/raw/air_quality/air_quality_all.csv", "air_quality"),),
     ),
     "weather_warning": JobSpec(
-        "weather_warning.py",
+        "collector/weather_warning.py",
         "*/10 * * * *",
         (OutputSpec("data/raw/weather_warning/weather_warning.csv", "weather_warning"),
             OutputSpec("data/raw/weather_warning/weather_warning_status.csv", "weather_warning_status"),),

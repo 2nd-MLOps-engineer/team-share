@@ -19,11 +19,12 @@ from sqlalchemy import create_engine, text
 PIPELINE_START = time.time()
 
 # 코드 폴더와 CSV를 모으는 workspace/data 경로를 분리
-PIPELINE_DIR = Path(__file__).resolve().parent
+COLLECTOR_DIR = Path(__file__).resolve().parent
+PIPELINE_DIR = COLLECTOR_DIR.parent
 PROJECT_ROOT = PIPELINE_DIR.parent
 
 # 모든 수집기가 공유하는 실제 env 파일
-ENV_PATH = PIPELINE_DIR / "collector" / ".env"
+ENV_PATH = COLLECTOR_DIR / ".env"
 
 RAW_DIR = PROJECT_ROOT / "data" / "raw" / "weather_warning"
 RAW_DIR.mkdir(parents=True, exist_ok=True)

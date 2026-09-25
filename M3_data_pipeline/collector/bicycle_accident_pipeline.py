@@ -1274,9 +1274,10 @@ def prepare_processed(raw_df: pd.DataFrame):
         )
     ).fillna(False)
 
-    # 원본 좌표는 raw에 남기고 processed의 결측/범위 밖 좌표는 NULL 처리한다.
-    processed["coordinate_valid"] = coordinate_valid.astype(bool)
-    processed.loc[~coordinate_valid, ["longitude", "latitude"]] = pd.NA
+    # 원본 좌표는 raw에 남기고 processed에서는 결측/범위 밖 좌표 행을 제거한다.
+    invalid_coordinate_count = int((~coordinate_valid).sum())
+    processed = processed.loc[coordinate_valid].copy()
+    processed["coordinate_valid"] = True
 
     normalized_geometries = processed["geom_json"].map(normalize_geojson)
     processed["geom_json"] = normalized_geometries.map(lambda item: item[0])
@@ -1400,9 +1401,7 @@ def prepare_processed(raw_df: pd.DataFrame):
         "raw_count": len(raw_df),
         "processed_count": len(processed),
         "duplicate_removed_count": duplicate_removed_count,
-        "invalid_coordinate_count": int(
-            (~processed["coordinate_valid"]).sum()
-        ),
+        "invalid_coordinate_count": invalid_coordinate_count,
         "invalid_polygon_count": int(
             (~processed["polygon_valid"]).sum()
         ),
@@ -1410,7 +1409,11 @@ def prepare_processed(raw_df: pd.DataFrame):
 
     if (
         quality["processed_count"]
-        != quality["raw_count"] - quality["duplicate_removed_count"]
+        != (
+            quality["raw_count"]
+            - quality["invalid_coordinate_count"]
+            - quality["duplicate_removed_count"]
+        )
     ):
         raise PipelineError(
             "raw/processed 건수 관계가 맞지 않습니다."
