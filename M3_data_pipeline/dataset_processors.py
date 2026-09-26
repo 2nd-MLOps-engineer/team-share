@@ -61,6 +61,21 @@ import time
 
 import pandas as pd
 
+if __package__:
+    from .dq_profiler import (
+        DQ_LINEAGE_COLUMN,
+        conversion_audit_active,
+        mark_conversion_audit_unavailable,
+        record_conversion_step,
+    )
+else:
+    from dq_profiler import (
+        DQ_LINEAGE_COLUMN,
+        conversion_audit_active,
+        mark_conversion_audit_unavailable,
+        record_conversion_step,
+    )
+
 
 # ============================================================
 # 공통 설정
@@ -163,6 +178,19 @@ def convert_numeric(
 ) -> pd.DataFrame:
     """확인된 숫자 컬럼을 nullable numeric으로 변환한다."""
 
+    converted_columns = [
+        column
+        for column in (*float_columns, *integer_columns)
+        if column in frame.columns
+    ]
+    audit_before = None
+    if conversion_audit_active() and DQ_LINEAGE_COLUMN in frame.columns:
+        audit_before = frame[[DQ_LINEAGE_COLUMN, *converted_columns]].copy()
+    elif conversion_audit_active() and converted_columns:
+        mark_conversion_audit_unavailable(
+            "numeric conversion ran without _dq_row_id"
+        )
+
     for column in float_columns:
         if column not in frame.columns:
             continue
@@ -204,6 +232,13 @@ def convert_numeric(
         numeric = numeric.where(integer_mask)
 
         frame[column] = numeric.astype("Int64")
+
+    if audit_before is not None:
+        record_conversion_step(
+            audit_before,
+            frame[[DQ_LINEAGE_COLUMN, *converted_columns]],
+            columns=converted_columns,
+        )
 
     return frame
 
@@ -328,11 +363,27 @@ def convert_datetimes(
 ) -> pd.DataFrame:
     """확인된 날짜/시간 컬럼을 변환한다."""
 
+    converted_columns = [column for column in columns if column in frame.columns]
+    audit_before = None
+    if conversion_audit_active() and DQ_LINEAGE_COLUMN in frame.columns:
+        audit_before = frame[[DQ_LINEAGE_COLUMN, *converted_columns]].copy()
+    elif conversion_audit_active() and converted_columns:
+        mark_conversion_audit_unavailable(
+            "datetime conversion ran without _dq_row_id"
+        )
+
     for column in columns:
         if column in frame.columns:
             frame[column] = safe_datetime_series(
                 frame[column]
             )
+
+    if audit_before is not None:
+        record_conversion_step(
+            audit_before,
+            frame[[DQ_LINEAGE_COLUMN, *converted_columns]],
+            columns=converted_columns,
+        )
 
     return frame
 
@@ -1005,6 +1056,14 @@ def process_weather(
     )
 
     if "fcstValue" in frame.columns:
+        audit_before = None
+        if conversion_audit_active() and DQ_LINEAGE_COLUMN in frame.columns:
+            audit_before = frame[[DQ_LINEAGE_COLUMN, "fcstValue"]].copy()
+        elif conversion_audit_active():
+            mark_conversion_audit_unavailable(
+                "weather value conversion ran without _dq_row_id"
+            )
+
         values = (
             frame["fcstValue"]
             .astype("string")
@@ -1030,6 +1089,13 @@ def process_weather(
             rain_category
         ]
         frame["fcstValue"] = converted_values
+
+        if audit_before is not None:
+            record_conversion_step(
+                audit_before,
+                frame[[DQ_LINEAGE_COLUMN, "fcstValue"]],
+                columns=("fcstValue",),
+            )
 
     convert_datetimes(
         frame,
@@ -1289,11 +1355,26 @@ def process_bicycle_accident(
         frame["coordinate_valid"] = True
 
     if "collected_at" in frame.columns:
+        audit_before = None
+        if conversion_audit_active() and DQ_LINEAGE_COLUMN in frame.columns:
+            audit_before = frame[[DQ_LINEAGE_COLUMN, "collected_at"]].copy()
+        elif conversion_audit_active():
+            mark_conversion_audit_unavailable(
+                "timestamp conversion ran without _dq_row_id"
+            )
+
         frame["collected_at"] = (
             safe_timestamp_series(
                 frame["collected_at"]
             )
         )
+
+        if audit_before is not None:
+            record_conversion_step(
+                audit_before,
+                frame[[DQ_LINEAGE_COLUMN, "collected_at"]],
+                columns=("collected_at",),
+            )
 
     # afos_id는 반복 가능하므로 단독 dedupe 금지.
     # 정확한 ID 규칙이 확정되기 전까지 추가 dedupe하지 않는다.
@@ -1896,7 +1977,9 @@ def process_dataset(
     # RAW 품질 통계
     # --------------------------------------------------------
 
-    raw_columns = len(raw.columns)
+    raw_columns = len(
+        [column for column in raw.columns if column != DQ_LINEAGE_COLUMN]
+    )
 
     raw_cells = (
         raw_rows
@@ -2050,7 +2133,7 @@ def process_dataset(
     # --------------------------------------------------------
 
     processed_columns = len(
-        processed.columns
+        [column for column in processed.columns if column != DQ_LINEAGE_COLUMN]
     )
 
     processed_cells = (
