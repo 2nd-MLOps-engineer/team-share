@@ -31,6 +31,7 @@ PROCESSED(Silver) 데이터를 생성한다.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -45,8 +46,10 @@ from sqlalchemy.engine import Engine, URL
 
 if __package__:
     from .dataset_processors import normalize_nulls, process_dataset
+    from .dq_profiler import DQProfileResult, profile_processor_run
 else:
     from dataset_processors import normalize_nulls, process_dataset
+    from dq_profiler import DQProfileResult, profile_processor_run
 
 
 LOGGER = logging.getLogger(__name__)
@@ -120,12 +123,81 @@ def normalize_missing_values(frame: pd.DataFrame) -> pd.DataFrame:
     return normalize_nulls(frame)
 
 
+def process_with_dq_profile(
+    table: str,
+    raw_frame: pd.DataFrame,
+) -> tuple[pd.DataFrame, DQProfileResult]:
+    """기존 processor를 lineage 기반 비차단 DQ 감사와 함께 실행한다."""
+
+    processed_frame, dq_result = profile_processor_run(
+        table,
+        raw_frame,
+        lambda frame: process_dataset(table, frame),
+        normalize_nulls,
+    )
+    serialized = json.dumps(
+        dq_result.as_dict(),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    if dq_result.status.value == "AUDIT_INVALID":
+        LOGGER.warning("dq_audit=%s", serialized)
+    else:
+        LOGGER.info("dq_audit=%s", serialized)
+    return processed_frame, dq_result
+
+
 def _validate_identifier(value: str) -> str:
     if not re.fullmatch(r"[a-z][a-z0-9_]*", value):
         raise ValueError(f"안전하지 않은 DB 식별자: {value!r}")
 
     return value
 
+POSTGRES_IDENTIFIER_MAX_LENGTH = 63
+STAGING_IDENTIFIER_MAX_LENGTH = 55
+
+
+def _make_staging_identifier(
+    table: str,
+    stage: str,
+) -> str:
+    """
+    PostgreSQL identifier 제한 63자 보다 여유 있게
+    staging 테이블명을 생성한다(55자).
+
+    형식:
+        stg_<table 일부>_<stage>_<uuid8>
+    """
+
+    table = _validate_identifier(table)
+    stage = _validate_identifier(stage)
+
+    suffix = uuid.uuid4().hex[:8]
+
+    prefix = "stg_"
+    tail = f"_{stage}_{suffix}"
+
+    max_table_length = (
+        STAGING_IDENTIFIER_MAX_LENGTH
+        - len(prefix)
+        - len(tail)
+    )
+
+    if max_table_length < 1:
+        raise ValueError(
+            f"staging identifier 생성 불가: "
+            f"stage={stage!r}"
+        )
+
+    shortened_table = table[:max_table_length]
+
+    staging = (
+        f"{prefix}"
+        f"{shortened_table}"
+        f"{tail}"
+    )
+
+    return _validate_identifier(staging)
 
 def _atomic_replace_pair(
     engine: Engine,
@@ -232,9 +304,9 @@ def _atomic_replace_processed(
 
     table = _validate_identifier(table)
 
-    suffix = uuid.uuid4().hex[:8]
-    staging = _validate_identifier(
-        f"stg_{table}_processed_{suffix}"
+    staging = _make_staging_identifier(
+        table,
+        "processed",
     )
 
     with engine.begin() as connection:
@@ -285,6 +357,7 @@ def _atomic_replace_processed(
             )
         )
 
+
 def _format_elapsed(seconds: float) -> str:
     """초 단위 실행시간을 읽기 쉬운 문자열로 변환한다."""
     if seconds < 60:
@@ -321,7 +394,7 @@ def load_csv_to_raw_and_processed(
 
     processing_started = time.perf_counter()
 
-    processed_frame = process_dataset(
+    processed_frame, _dq_result = process_with_dq_profile(
         table,
         raw_frame,
     )
@@ -480,7 +553,7 @@ def load_raw_to_processed(
 
         processing_started = time.perf_counter()
 
-        processed_frame = process_dataset(
+        processed_frame, _dq_result = process_with_dq_profile(
             table,
             raw_frame,
         )
@@ -586,4 +659,4 @@ def load_raw_to_processed(
 
     finally:
         if own_engine:
-            db_engine.dispose()    
+            db_engine.dispose()
