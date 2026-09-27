@@ -445,15 +445,13 @@ Source
   ↓
 Collection
   ↓
-RAW (Bronze)
+RAW
   ↓
-Cleaning / Validation
+Cleaning / Transformation
   ↓
 Data Quality Audit
   ↓
-PROCESSED (Silver)
+PROCESSED
   ↓
-Backend / Service
+Backend
 ```
-
-원본을 남기는 것에서 끝나는 것이 아니라 **변환 과정에서 무엇이 제거되고 무엇이 새롭게 결측값이 되었는지 설명할 수 있는 파이프라인**을 목표로 설계했습니다.
