@@ -1,5 +1,6 @@
 import os
 import math
+import sys
 import time
 import requests
 import pandas as pd
@@ -9,16 +10,19 @@ from pathlib import Path
 from dotenv import load_dotenv
 from urllib.parse import unquote
 
+PIPELINE_DIR = Path(__file__).resolve().parents[1]
+if str(PIPELINE_DIR) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_DIR))
+
+from pipeline_elt import replace_raw_dataset_group
+
 
 # ============================================================
 # 1. 환경변수 / 기본 설정
 # ============================================================
 
 CURRENT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_PATH = CURRENT_DIR / ".env"
-OUTPUT_DIR = PROJECT_ROOT / "data" / "raw" / "aed"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 load_dotenv(ENV_PATH, override=False)
 
@@ -37,9 +41,6 @@ URL = (
 NUM_OF_ROWS = 1000
 MAX_RETRIES = 3
 RETRY_DELAY = 3
-
-OUTPUT_PATH = OUTPUT_DIR / "aed.csv"
-
 
 # ============================================================
 # 2. API 요청 함수
@@ -287,16 +288,11 @@ else:
 
 
 # ============================================================
-# 13. RAW CSV 저장
+# 13. RAW DB 저장
 # ============================================================
-
-temporary_path = OUTPUT_PATH.with_suffix(".tmp.csv")
-df.to_csv(
-    temporary_path,
-    index=False,
-    encoding="utf-8-sig"
+replace_raw_dataset_group(
+    {"aed": df}
 )
-temporary_path.replace(OUTPUT_PATH)
 
 
 # ============================================================
@@ -310,6 +306,6 @@ print("=" * 60)
 print("AED 수집 완료")
 print("=" * 60)
 
-print(f"저장 파일 : {OUTPUT_PATH}")
+print("RAW DB : raw.aed")
 print(f"저장 건수 : {len(df):,}건")
 print(f"소요 시간 : {elapsed:.1f}초")

@@ -2,11 +2,18 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from urllib.parse import unquote
 import os
+import sys
 import time
 
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+
+PIPELINE_DIR = Path(__file__).resolve().parents[1]
+if str(PIPELINE_DIR) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_DIR))
+
+from pipeline_elt import replace_raw_dataset_group
 
 
 # ==================================================
@@ -19,19 +26,6 @@ from dotenv import load_dotenv
 # parents[2] = team-share
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-OUTPUT_DIR = (
-    PROJECT_ROOT
-    / "data"
-    / "raw"
-    / "weather"
-)
-
-OUTPUT_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
-
 
 # ==================================================
 # 2. .env 파일 자동 탐색
@@ -62,7 +56,7 @@ if ENV_PATH is None:
 
 load_dotenv(
     dotenv_path=ENV_PATH,
-    override=True
+    override=False
 )
 
 API_KEY_RAW = os.getenv("WEATHER_API_KEY")
@@ -385,25 +379,6 @@ def main():
 
     ncst_df = collect_ncst()
 
-    ncst_path = (
-        OUTPUT_DIR
-        / "weather_ultra_ncst.csv"
-    )
-
-    ncst_temporary_path = ncst_path.with_suffix(".tmp.csv")
-    ncst_df.to_csv(
-        ncst_temporary_path,
-        index=False,
-        encoding="utf-8-sig"
-    )
-    ncst_temporary_path.replace(ncst_path)
-
-    print()
-    print(
-        "실황 저장:",
-        ncst_path
-    )
-
     print(
         "실황 건수:",
         f"{len(ncst_df):,}"
@@ -415,28 +390,16 @@ def main():
 
     fcst_df = collect_fcst()
 
-    fcst_path = (
-        OUTPUT_DIR
-        / "weather_ultra_fcst.csv"
-    )
-
-    fcst_temporary_path = fcst_path.with_suffix(".tmp.csv")
-    fcst_df.to_csv(
-        fcst_temporary_path,
-        index=False,
-        encoding="utf-8-sig"
-    )
-    fcst_temporary_path.replace(fcst_path)
-
-    print()
-    print(
-        "예보 저장:",
-        fcst_path
-    )
-
     print(
         "예보 건수:",
         f"{len(fcst_df):,}"
+    )
+
+    replace_raw_dataset_group(
+        {
+            "weather_ultra_ncst": ncst_df,
+            "weather_ultra_fcst": fcst_df,
+        }
     )
 
     # ------------------------------------------------
@@ -473,9 +436,7 @@ def main():
     )
 
     print()
-    print("저장 파일:")
-    print(ncst_path)
-    print(fcst_path)
+    print("RAW DB 저장: raw.weather_ultra_ncst, raw.weather_ultra_fcst")
 
 
 # ==================================================

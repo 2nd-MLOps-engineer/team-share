@@ -1,59 +1,95 @@
-"""
-M3 데이터 수집·정제·DB 적재 작업을 스케줄링하고 실행한다.
+﻿"""
+M3 데이터 통합 파이프라인 스케줄러.
+
+데이터 수집부터 RAW 저장, 정제, PROCESSED 적재까지의
+데이터 파이프라인 작업을 데이터셋별로 스케줄링하고 실행한다.
 
 주요 역할:
 1. 데이터셋별 collector를 지정된 주기에 실행한다.
 2. 타임아웃, 연결 오류 등 일시적인 수집 오류에 한해서만 제한적으로 재시도한다.
 3. 수집된 원본 데이터를 RAW 영역에 저장한다.
-4. 원본 데이터를 dataset_processors.py의 데이터셋별 정제 과정을 거쳐 
+4. 원본 데이터를 dataset_processors.py의 데이터셋별 정제 과정을 거쳐
    PROCESSED 영역에 저장한다.
-5. 수집 완료 데이터를 재사용하여 DB 적재 실패 시 불필요한 재수집을 방지한다
-6. 한 작업이 실패해도 다른 데이터셋 작업은 독립적으로 실행한다.
+5. --load-existing 실행 시 기존 RAW DB 데이터를 재사용한다.
+6. 한 작업이 실패해도 다른 데이터셋 작업은 독립적으로 계속 실행한다.
 7. 실행 시작·성공·실패·재시도 상태를 로그로 남긴다.
+8. single/multi-table 데이터셋을 같은 RAW DB 기반 metadata 계약으로 처리한다.
 
-문화빅데이터 수집은 기존 culture_bigdata_scheduler.py가
-별도로 담당하므로 이 스케줄러에서 실행하지 않는다.
+--run-all-once는 metadata의 실행 phase/run_order 순서대로 직렬 실행된다.
+run_last dataset은 앞선 phase가 모두 성공한 뒤 마지막에 실행된다.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
+
+from sqlalchemy.engine import Engine
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 if __package__:
-    from .pipeline_common import (
+    from .dq_profiler import DQProfileResult
+    from .pipeline_elt import (
         WORKSPACE_ROOT,
         create_db_engine,
-        load_csv_to_raw_and_processed,
-        load_raw_to_processed,
+        load_dataset,
         load_environment,
     )
+    from .pipeline_metadata import (
+        DatasetSpec,
+        get_dataset_specs,
+    )
+    from .pipeline_monitoring import (
+        aggregate_dq_status,
+        get_operations_summary,
+        new_run_id,
+        utc_now,
+        write_pipeline_run_history,
+    )
+    from .webhook_notifier import (
+        send_dq_failure_alert,
+        send_operations_summary,
+        send_pipeline_failure_alert,
+    )
 else:
-    from pipeline_common import (
+    from dq_profiler import DQProfileResult
+    from pipeline_elt import (
         WORKSPACE_ROOT,
         create_db_engine,
-        load_csv_to_raw_and_processed,
-        load_raw_to_processed,
+        load_dataset,
         load_environment,
+    )
+    from pipeline_metadata import (
+        DatasetSpec,
+        get_dataset_specs,
+    )
+    from pipeline_monitoring import (
+        aggregate_dq_status,
+        get_operations_summary,
+        new_run_id,
+        utc_now,
+        write_pipeline_run_history,
+    )
+    from webhook_notifier import (
+        send_dq_failure_alert,
+        send_operations_summary,
+        send_pipeline_failure_alert,
     )
 
 
 TIMEZONE = timezone(timedelta(hours=9), name="Asia/Seoul")
 LOGGER = logging.getLogger("pipeline_scheduler")
 PIPELINE_DIR = Path(__file__).resolve().parent
-STATE_DIR = WORKSPACE_ROOT / "data" / "pipeline_state"
 
 
 class CollectionStageError(RuntimeError):
@@ -64,192 +100,42 @@ class TransientCollectionError(CollectionStageError):
     """timeout/연결/일시적 서버 오류로 재시도할 수 있는 수집 실패."""
 
 
-@dataclass(frozen=True)
-class OutputSpec:
-    pattern: str
-    table: str
+JOB_SPECS: dict[str, DatasetSpec] = dict(get_dataset_specs())
 
 
-@dataclass(frozen=True)
-class JobSpec:
-    script: str
-    default_cron: str
-    outputs: tuple[OutputSpec, ...] = field(default_factory=tuple)
-    manages_database: bool = False
-    default_attempts: int = 3
+def _run_all_once_phases() -> tuple[tuple[str, ...], ...]:
+    """현재는 직렬 실행하고, 향후 bounded executor가 사용할 phase를 반환한다."""
+
+    ordered = sorted(
+        JOB_SPECS,
+        key=lambda job_id: JOB_SPECS[job_id].run_order,
+    )
+    regular = tuple(
+        job_id for job_id in ordered if not JOB_SPECS[job_id].run_last
+    )
+    deferred = tuple(
+        job_id for job_id in ordered if JOB_SPECS[job_id].run_last
+    )
+    return tuple(phase for phase in (regular, deferred) if phase)
 
 
-# 분/시/일/월/요일 (APScheduler CronTrigger.from_crontab 형식)
-# 문화 빅데이터는 검증 완료된 culture_bigdata_scheduler.py가 독립 운영한다.
-# 이 목록에 넣거나 해당 두 문화 빅데이터 파일을 래핑하지 않는다.
-JOB_SPECS: dict[str, JobSpec] = {
-    "weather": JobSpec(
-        "collector/weather.py",
-        "10,40 * * * *",
-        (
-            OutputSpec("data/raw/weather/weather_ultra_ncst.csv", "weather_ultra_ncst"),
-            OutputSpec("data/raw/weather/weather_ultra_fcst.csv", "weather_ultra_fcst"),
-        ),
-    ),
-    "air_quality": JobSpec(
-        "collector/air_quality.py",
-        "15 * * * *",
-        (OutputSpec("data/raw/air_quality/air_quality_all.csv", "air_quality"),),
-    ),
-    "weather_warning": JobSpec(
-        "collector/weather_warning.py",
-        "*/10 * * * *",
-        (OutputSpec("data/raw/weather_warning/weather_warning.csv", "weather_warning"),
-            OutputSpec("data/raw/weather_warning/weather_warning_status.csv", "weather_warning_status"),),
-    ),
-    "bus_stop": JobSpec(
-        "collector/busstop_api.py",
-        "0 3 * * 0",
-        (OutputSpec("data/raw/bus_stop/tago_bus_stops_all.csv", "bus_stop"),),
-    ),
-    "durunubi": JobSpec(
-        "collector/durunubi_api.py",
-        "0 4 * * 1",
-        (OutputSpec("data/raw/durunubi/durunubi_trails.csv", "durunubi_trails"),
-         OutputSpec("data/raw/durunubi/durunubi_segments.csv", "durunubi_segments"),),
-    ),
-    "facility": JobSpec(
-        "collector/facility_api_v2.py",
-        "0 4 1 * *",
-        (OutputSpec("data/raw/facility/facility_all_*.csv", "facility"),),
-    ),
-    "public_open_facility": JobSpec(
-        "collector/open_facil_api.py",
-        "0 5 1 * *",
-        (
-            OutputSpec(
-                "data/raw/public_open_facility/public_open_facility_all.csv",
-                "public_open_facility",
-            ),
-        ),
-    ),
-    "aed": JobSpec(
-        "collector/AED_api.py",
-        "0 3 2 * *",
-        (OutputSpec("data/raw/aed/aed.csv", "aed"),),
-    ),
-    "bicycle_accident": JobSpec(
-        "collector/bicycle_accident_pipeline.py",
-        "0 2 3 * *",
-        (
-            OutputSpec(
-                "data/raw/koroad_bicycle/koroad_bicycle_accident_hotspots.csv",
-                "koroad_bicycle_accident_hotspots",
-            ),
-        ),
-        default_attempts=2,
-    ),
-
-    "culture_bigdata": JobSpec(
-        "culture_bigdata_selenium.py",
-        "0 7 1 * *",
-        manages_database=True,
-        default_attempts=2,
-    ),
-}
-
-CULTURE_TABLES = (
-    "culture_public_sports_facilities",
-    "culture_public_sports_facility_programs",
-    "culture_sports_facility_nearby_public_transport",
-    "culture_national_sports_facility_status",
-    "culture_location_fitness_measurement_prescriptions",
-    "culture_open_school_sports_facilities",
-    "culture_sports_facility_safety_inspections",
-    "culture_fitness_measurement_prescriptions",
-)
-
-
-
-def _cron_for(job_id: str, spec: JobSpec) -> str:
+def _cron_for(job_id: str, spec: DatasetSpec) -> str:
     return os.getenv(f"{job_id.upper()}_CRON", spec.default_cron)
-
-
-def _resolve_output(output: OutputSpec) -> Path:
-    matches = sorted(
-        WORKSPACE_ROOT.glob(output.pattern),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    if not matches:
-        raise RuntimeError(f"수집 결과 CSV를 찾을 수 없습니다: {output.pattern}")
-    return matches[0]
-
-
-def _resolve_outputs(spec: JobSpec) -> list[tuple[OutputSpec, Path]]:
-    return [(output, _resolve_output(output)) for output in spec.outputs]
-
-
-def _state_path(job_id: str) -> Path:
-    return STATE_DIR / f"{job_id}.json"
-
-
-def _save_resume_state(
-    job_id: str,
-    outputs: list[tuple[OutputSpec, Path]],
-) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    state_path = _state_path(job_id)
-    temporary_path = state_path.with_suffix(".tmp.json")
-    payload = {
-        "job_id": job_id,
-        "stage": "csv_ready",
-        "outputs": [
-            {
-                "table": output.table,
-                "path": str(path.resolve()),
-                "size": path.stat().st_size,
-                "mtime_ns": path.stat().st_mtime_ns,
-            }
-            for output, path in outputs
-        ],
-    }
-    temporary_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temporary_path.replace(state_path)
-
-
-def _load_resume_state(
-    job_id: str,
-    spec: JobSpec,
-) -> list[tuple[OutputSpec, Path]] | None:
-    state_path = _state_path(job_id)
-    if not state_path.is_file() or spec.manages_database:
-        return None
-    try:
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
-        records = payload["outputs"]
-        by_table = {record["table"]: record for record in records}
-        resolved = []
-        for output in spec.outputs:
-            record = by_table[output.table]
-            path = Path(record["path"])
-            if (
-                not path.is_file()
-                or path.stat().st_size != record["size"]
-                or path.stat().st_mtime_ns != record["mtime_ns"]
-            ):
-                return None
-            resolved.append((output, path))
-        return resolved
-    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
-        LOGGER.warning("job=%s invalid resume state ignored: %s", job_id, state_path)
-        return None
-
-
-def _clear_resume_state(job_id: str) -> None:
-    _state_path(job_id).unlink(missing_ok=True)
 
 
 def _is_transient_collection_error(stderr: str) -> bool:
     message = stderr.lower()
+
+    # data.go.kr 일일 호출 한도 초과는 같은 날 재시도해도 복구되지 않는다.
+    # 일반 HTTP 429와 구분해서 scheduler 재시도 대상에서 제외한다.
+    non_retryable_markers = (
+        "limited_number_of_service_requests_exceeds_error",
+        "returnreasoncode\": \"22",
+        "일일 서비스 요청제한 횟수 초과",
+    )
+    if any(marker in message for marker in non_retryable_markers):
+        return False
+
     markers = (
         "timeout",
         "timed out",
@@ -270,8 +156,8 @@ def _is_transient_collection_error(stderr: str) -> bool:
     return any(marker in message for marker in markers)
 
 
-def _run_script(spec: JobSpec) -> None:
-    script_path = PIPELINE_DIR / spec.script
+def _run_script(spec: DatasetSpec) -> None:
+    script_path = PIPELINE_DIR / spec.collector_script
     if not script_path.is_file():
         raise FileNotFoundError(script_path)
 
@@ -296,11 +182,11 @@ def _run_script(spec: JobSpec) -> None:
             else CollectionStageError
         )
         raise error_type(
-            f"collector exited with code {result.returncode}: {spec.script}"
+            f"collector exited with code {result.returncode}: {spec.collector_script}"
         )
 
 
-def _collect_with_transient_retry(job_id: str, spec: JobSpec) -> None:
+def _collect_with_transient_retry(job_id: str, spec: DatasetSpec) -> None:
     max_attempts = int(
         os.getenv(
             f"{job_id.upper()}_MAX_ATTEMPTS",
@@ -309,6 +195,7 @@ def _collect_with_transient_retry(job_id: str, spec: JobSpec) -> None:
     )
     retry_seconds = float(os.getenv("PIPELINE_JOB_RETRY_SECONDS", "30"))
     for attempt in range(1, max_attempts + 1):
+        attempt_started = time.monotonic()
         try:
             LOGGER.info(
                 "job=%s stage=collect status=START attempt=%s/%s",
@@ -317,29 +204,47 @@ def _collect_with_transient_retry(job_id: str, spec: JobSpec) -> None:
                 max_attempts,
             )
             _run_script(spec)
-            LOGGER.info("job=%s stage=collect status=OK", job_id)
-            return
-        except TransientCollectionError:
-            LOGGER.exception(
-                "job=%s stage=collect status=TRANSIENT_FAILED attempt=%s/%s",
+            LOGGER.info(
+                "job=%s stage=collect status=OK attempt=%s/%s "
+                "elapsed_seconds=%.3f",
                 job_id,
                 attempt,
                 max_attempts,
+                time.monotonic() - attempt_started,
+            )
+            return
+        except TransientCollectionError:
+            LOGGER.exception(
+                "job=%s stage=collect status=TRANSIENT_FAILED attempt=%s/%s "
+                "elapsed_seconds=%.3f",
+                job_id,
+                attempt,
+                max_attempts,
+                time.monotonic() - attempt_started,
             )
             if attempt == max_attempts:
                 raise
             time.sleep(retry_seconds * attempt)
+        except Exception:
+            LOGGER.exception(
+                "job=%s stage=collect status=FAILED attempt=%s/%s "
+                "elapsed_seconds=%.3f",
+                job_id,
+                attempt,
+                max_attempts,
+                time.monotonic() - attempt_started,
+            )
+            raise
 
 
-def _load_outputs_to_database(
-    outputs: list[tuple[OutputSpec, Path]],
-) -> None:
-    engine = create_db_engine()
-    try:
-        for output, csv_path in outputs:
-            load_csv_to_raw_and_processed(csv_path, output.table, engine)
-    finally:
-        engine.dispose()
+def _process_and_load_dataset(
+    spec: DatasetSpec,
+    engine: Engine,
+) -> tuple[
+    dict[str, tuple[int, int]],
+    dict[str, DQProfileResult],
+]:
+    return load_dataset(spec, engine)
 
 
 def run_job(
@@ -348,63 +253,257 @@ def run_job(
     skip_db: bool = False,
     load_existing: bool = False,
 ) -> None:
-    """수집만 일시 오류에 재시도하고, CSV 이후 실패는 기존 CSV에서 재개한다."""
+    """수집 오류만 재시도하고 collector가 적재한 RAW를 공통 ELT로 처리한다."""
 
     if job_id not in JOB_SPECS:
         raise KeyError(f"알 수 없는 job: {job_id}")
 
+    job_started = time.monotonic()
+    started_at = utc_now()
+    run_id = new_run_id()
+
     spec = JOB_SPECS[job_id]
-    LOGGER.info("job=%s status=START", job_id)
 
-    if spec.manages_database:
-        if load_existing:
-            raise ValueError(
-                f"{job_id}는 자체 DB 파이프라인이라 --load-existing 불가"
-            )
+    results = None
+    dq_results = None
+    engine = None
 
-        _collect_with_transient_retry(job_id, spec)
+    collect_seconds = 0.0
+    load_seconds = 0.0
+    failure_stage = None
 
-        if job_id == "culture_bigdata":
-            LOGGER.info("job=%s stage=process status=START", job_id)
-
-            for table in CULTURE_TABLES:
-                load_raw_to_processed(table)
-
-            LOGGER.info("job=%s stage=process status=OK", job_id)
-
-        LOGGER.info("job=%s status=OK", job_id)
-        return
-
-    outputs = None if load_existing else _load_resume_state(job_id, spec)
-    if outputs is not None:
-        LOGGER.info("job=%s stage=collect status=SKIPPED reason=csv_ready", job_id)
-    elif load_existing:
-        outputs = _resolve_outputs(spec)
-        LOGGER.info("job=%s stage=collect status=SKIPPED reason=load_existing", job_id)
-        _save_resume_state(job_id, outputs)
-    else:
-        _collect_with_transient_retry(job_id, spec)
-        outputs = _resolve_outputs(spec)
-        _save_resume_state(job_id, outputs)
-
-    if skip_db:
-        _clear_resume_state(job_id)
-        LOGGER.info("job=%s status=OK db=SKIPPED", job_id)
-        return
+    LOGGER.info(
+        "job=%s run_id=%s status=START",
+        job_id,
+        run_id,
+    )
 
     try:
-        LOGGER.info("job=%s stage=database status=START", job_id)
-        _load_outputs_to_database(outputs)
-    except Exception:
-        LOGGER.exception(
-            "job=%s stage=database status=FAILED retry=DISABLED resume=csv_ready",
+        collect_started = time.monotonic()
+        failure_stage = "collect"
+
+        if load_existing:
+            LOGGER.info(
+                "job=%s stage=collect status=SKIPPED reason=load_existing_raw",
+                job_id,
+            )
+        else:
+            _collect_with_transient_retry(job_id, spec)
+
+        collect_seconds = time.monotonic() - collect_started
+
+        if skip_db:
+            LOGGER.info(
+                "job=%s run_id=%s status=OK db=SKIPPED elapsed_seconds=%.3f",
+                job_id,
+                run_id,
+                time.monotonic() - job_started,
+            )
+            return
+
+        failure_stage = "load"
+        load_started = time.monotonic()
+
+        LOGGER.info(
+            "job=%s stage=load status=START",
             job_id,
         )
+
+        engine = create_db_engine()
+
+        results, dq_results = _process_and_load_dataset(
+            spec,
+            engine,
+        )
+
+        load_seconds = time.monotonic() - load_started
+
+        LOGGER.info(
+            "job=%s stage=load status=OK elapsed_seconds=%.3f",
+            job_id,
+            load_seconds,
+        )
+
+        dq_status = aggregate_dq_status(dq_results)
+        run_status = (
+            "WARNING"
+            if dq_status == "CHECK_FAILED"
+            else "SUCCESS"
+        )
+
+
+        failure_stage = None
+        finished_at = utc_now()
+        total_seconds = time.monotonic() - job_started
+
+        try:
+            write_pipeline_run_history(
+                engine,
+                run_id=run_id,
+                job_id=job_id,
+                dataset=job_id,
+                source_kind=spec.source_kind.value,
+                run_status=run_status,
+                started_at=started_at,
+                results=results,
+                dq_results=dq_results,
+                stage_durations={
+                    "collect_seconds": collect_seconds,
+                    "load_seconds": load_seconds,
+                    "total_seconds": total_seconds,
+                },
+                finished_at=finished_at,
+            )
+        except Exception:
+            LOGGER.exception(
+                "job=%s run_id=%s stage=monitoring status=FAILED",
+                job_id,
+                run_id,
+            )
+
+        LOGGER.info(
+            "job=%s run_id=%s status=%s dq_status=%s "
+            "elapsed_seconds=%.3f",
+            job_id,
+            run_id,
+            run_status,
+            dq_status,
+            total_seconds,
+        )
+
+    except Exception as error:
+        total_seconds = time.monotonic() - job_started
+
+        LOGGER.exception(
+            "job=%s run_id=%s stage=%s status=FAILED "
+            "elapsed_seconds=%.3f",
+            job_id,
+            run_id,
+            failure_stage,
+            total_seconds,
+        )
+
+        try:
+            monitoring_engine = engine or create_db_engine()
+
+            write_pipeline_run_history(
+                monitoring_engine,
+                run_id=run_id,
+                job_id=job_id,
+                dataset=job_id,
+                source_kind=spec.source_kind.value,
+                run_status="FAILED",
+                started_at=started_at,
+                results=results,
+                dq_results=dq_results,
+                stage_durations={
+                    "collect_seconds": collect_seconds,
+                    "load_seconds": load_seconds,
+                    "total_seconds": total_seconds,
+                },
+                failure_stage=failure_stage,
+                error=error,
+                finished_at=utc_now(),
+            )
+
+            if engine is None:
+                monitoring_engine.dispose()
+
+        except Exception:
+            LOGGER.exception(
+                "job=%s run_id=%s stage=monitoring status=FAILED "
+                "original_failure_stage=%s",
+                job_id,
+                run_id,
+                failure_stage,
+            )
+
+        send_pipeline_failure_alert(
+            job_id=job_id,
+            run_id=run_id,
+            failure_stage=failure_stage,
+            error=error,
+            elapsed_seconds=total_seconds,
+        )
+
         raise
 
-    _clear_resume_state(job_id)
-    LOGGER.info("job=%s stage=database status=OK", job_id)
-    LOGGER.info("job=%s status=OK", job_id)
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+
+def send_scheduled_operations_summary() -> None:
+    """08:00 / 17:00 KST 기준 파이프라인 운영 현황을 Discord로 전송한다."""
+    load_environment()
+
+    now = datetime.now(TIMEZONE)
+
+    if now.hour == 8:
+        period_end = now.replace(
+            hour=8,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        period_start = (
+            period_end - timedelta(days=1)
+        ).replace(hour=17)
+
+        period_label = "Night Operations"
+
+    elif now.hour == 17:
+        period_end = now.replace(
+            hour=17,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        period_start = period_end.replace(hour=8)
+
+        period_label = "Day Operations"
+
+    else:
+        LOGGER.warning(
+            "operations_summary status=SKIPPED unexpected_hour=%s",
+            now.hour,
+        )
+        return
+
+    engine = create_db_engine()
+
+    try:
+        summary = get_operations_summary(
+            engine,
+            period_start=period_start,
+            period_end=period_end,
+        )
+
+        send_operations_summary(
+            period_label=period_label,
+            period_start=period_start.isoformat(),
+            period_end=period_end.isoformat(),
+            **summary,
+        )
+
+        LOGGER.info(
+            "operations_summary status=COMPLETE "
+            "period_start=%s period_end=%s total_runs=%s",
+            period_start.isoformat(),
+            period_end.isoformat(),
+            summary["total_runs"],
+        )
+
+    except Exception:
+        LOGGER.exception(
+            "operations_summary status=FAILED "
+            "period_start=%s period_end=%s",
+            period_start.isoformat(),
+            period_end.isoformat(),
+        )
+
+    finally:
+        engine.dispose()
 
 
 def create_scheduler(*, skip_db: bool = False) -> BlockingScheduler:
@@ -420,14 +519,31 @@ def create_scheduler(*, skip_db: bool = False) -> BlockingScheduler:
     for job_id, spec in JOB_SPECS.items():
         scheduler.add_job(
             run_job,
-            trigger=CronTrigger.from_crontab(_cron_for(job_id, spec), timezone=TIMEZONE),
+            trigger=CronTrigger.from_crontab(
+                _cron_for(job_id, spec),
+                timezone=TIMEZONE
+            ),
             args=[job_id],
             kwargs={"skip_db": skip_db},
             id=job_id,
-            name=f"{job_id}: collect -> CSV -> raw/processed",
+            name=f"{job_id}: collect -> process -> database",
             replace_existing=True,
         )
+
+    scheduler.add_job(
+        send_scheduled_operations_summary,
+        trigger=CronTrigger(
+            hour="8,17",
+            minute=0,
+            timezone=TIMEZONE,
+        ),
+        id="operations_summary",
+        name="08:00 / 17:00 pipeline operations summary",
+        replace_existing=True,
+    )
+
     return scheduler
+
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -440,22 +556,85 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--skip-db",
         action="store_true",
-        help="API/CSV 수집만 실행하고 공통 DB 적재는 생략",
+        help="collector만 실행하고 공통 process/database 단계는 생략",
     )
     return parser.parse_args(argv)
 
+class DQAuditFilter(logging.Filter):
+    """dq_audit 로그 레코드만 통과시킨다."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.getMessage().startswith("dq_audit=")
+
+
+def configure_logging() -> None:
+    """메인 데이터 파이프라인의 콘솔 및 영구 파일 로그를 설정한다."""
+
+    log_dir = Path(__file__).resolve().parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    )
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    # 중복 handler 방지
+    root_logger.handlers.clear()
+
+    # 1. 콘솔
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    # 2. 전체 파이프라인 실행 로그
+    pipeline_handler = RotatingFileHandler(
+        log_dir / "pipeline.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    pipeline_handler.setLevel(logging.INFO)
+    pipeline_handler.setFormatter(formatter)
+    root_logger.addHandler(pipeline_handler)
+
+    # 3. ERROR 이상 전용 로그
+    error_handler = RotatingFileHandler(
+        log_dir / "error.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(formatter)
+    root_logger.addHandler(error_handler)
+
+    # 4. DQ 감사 로그
+    dq_handler = RotatingFileHandler(
+        log_dir / "dq_audit.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    dq_handler.setLevel(logging.INFO)
+    dq_handler.setFormatter(formatter)
+    dq_handler.addFilter(DQAuditFilter())
+    root_logger.addHandler(dq_handler)
+
 
 def main(argv: Sequence[str] | None = None) -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging()
     load_environment()
     args = parse_args(argv)
 
     if args.list:
         for job_id, spec in JOB_SPECS.items():
-            print(f"{job_id:22} {_cron_for(job_id, spec)}  {spec.script}")
+            print(
+                f"{job_id:22} {_cron_for(job_id, spec)}  "
+                f"{spec.collector_script}"
+            )
         return 0
     if args.run_once:
         run_job(args.run_once, skip_db=args.skip_db)
@@ -467,14 +646,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.run_all_once:
         failures: list[str] = []
-        for job_id in JOB_SPECS:
-            try:
-                run_job(job_id, skip_db=args.skip_db)
-            except Exception:
-                LOGGER.exception("job=%s 최종 실패", job_id)
-                failures.append(job_id)
+        skipped: list[str] = []
+        for phase_number, job_ids in enumerate(_run_all_once_phases(), start=1):
+            if failures:
+                skipped.extend(job_ids)
+                LOGGER.warning(
+                    "run_all phase=%s status=SKIPPED jobs=%s "
+                    "reason=prior_phase_failed",
+                    phase_number,
+                    ",".join(job_ids),
+                )
+                break
+
+            for job_id in job_ids:
+                try:
+                    run_job(job_id, skip_db=args.skip_db)
+                except Exception:
+                    LOGGER.exception("job=%s 최종 실패", job_id)
+                    failures.append(job_id)
         if failures:
-            raise RuntimeError("실패 작업: " + ", ".join(failures))
+            message = "실패 작업: " + ", ".join(failures)
+            if skipped:
+                message += " / 선행 실패로 미실행: " + ", ".join(skipped)
+            raise RuntimeError(message)
         return 0
 
     scheduler = create_scheduler(skip_db=args.skip_db)

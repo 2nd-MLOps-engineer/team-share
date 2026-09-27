@@ -162,10 +162,26 @@ class DatasetProcessorsTest(unittest.TestCase):
         raw = pd.DataFrame(
             {
                 "afos_fid": ["A"],
+                "afos_id": ["2024060"],
+                "bjd_cd": ["1111010100"],
+                "spot_cd": ["1"],
+                "sido_sgg_nm": ["서울 종로구"],
                 "spot_nm": ["테스트 지점"],
+                "request_year": ["2024"],
+                "request_sido": ["11"],
+                "request_gugun": ["110"],
+                "request_province_name": ["서울특별시"],
+                "request_district_name": ["종로구"],
+                "expected_afos_id": ["2024060"],
+                "request_page_no": ["1"],
                 "lo_crd": ["127.0123"],
                 "la_crd": ["37.4567"],
                 "occrrnc_cnt": ["4"],
+                "caslt_cnt": ["5"],
+                "dth_dnv_cnt": ["0"],
+                "se_dnv_cnt": ["1"],
+                "sl_dnv_cnt": ["4"],
+                "wnd_dnv_cnt": ["0"],
                 "geom_json": [polygon],
                 "collected_at": ["2026-09-26T12:00:00+09:00"],
             }
@@ -182,6 +198,41 @@ class DatasetProcessorsTest(unittest.TestCase):
         self.assertAlmostEqual(float(result.loc[0, "longitude"]), 127.0123)
         self.assertAlmostEqual(float(result.loc[0, "latitude"]), 37.4567)
         self.assertEqual(result.loc[0, "geom_json"], polygon)
+        self.assertEqual(int(result.loc[0, "search_year"]), 2024)
+        self.assertEqual(result.loc[0, "si_do"], "11")
+        self.assertEqual(result.loc[0, "gu_gun"], "110")
+
+    def test_weather_warning_status_structures_current_snapshot(self):
+        raw = pd.DataFrame(
+            {
+                "t6": ["강풍주의보: 서울특별시"],
+                "t7": ["(1) 풍랑 예비특보\no 09월 27일 오후: 서해중부먼바다"],
+                "tmEf": ["202609271800"],
+                "tmFc": ["202609271200"],
+                "tmSeq": ["1"],
+                "collected_at": ["2026-09-27 12:05:00"],
+            }
+        )
+
+        result = process_dataset("weather_warning_status", raw)
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(set(result["warning_status"]), {"ACTIVE", "PRELIMINARY"})
+        self.assertEqual(set(result["area_type"]), {"LAND", "SEA"})
+
+    def test_weather_warning_status_allows_explicit_empty_snapshot(self):
+        raw = pd.DataFrame(
+            columns=["t6", "t7", "tmEf", "tmFc", "tmSeq", "collected_at"]
+        )
+
+        result = process_dataset(
+            "weather_warning_status",
+            raw,
+            allow_empty=True,
+        )
+
+        self.assertTrue(result.empty)
+        self.assertIn("warning_status", result.columns)
 
     def test_culture_open_school_preserves_nearby_count_source_strings(self):
         source_values = [

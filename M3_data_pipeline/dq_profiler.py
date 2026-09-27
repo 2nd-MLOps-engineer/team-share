@@ -1,8 +1,16 @@
-"""Lineage-based, non-blocking data-quality audit helpers.
+"""행 추적 기반의 데이터 품질(DQ) 프로파일러.
 
-The helpers in this module observe a processor run without defining data-quality
-gates.  In particular, ``AUDIT_INVALID`` describes an audit whose evidence is
-incomplete or internally inconsistent; it does not describe a failed dataset.
+데이터의 상태와 변환 흔적을 측정해서 프로필을 만든다.
+DQ 검사에서 문제가 발견되면 이를 기록하되,
+현재는 해당 결과만으로 파이프라인 실행을 중단하지 않는다(비차단,non-blocking).
+
+RAW 데이터가 processor를 거쳐 PROCESSED 데이터로 변환되는 동안
+행 추적, 행 수 변화, NULL 변화, 중복, 검토가 필요한 행 등의
+품질 지표를 측정하고 그 결과를 DQ 프로파일로 생성한다.
+
+``CHECK_FAILED``는 검사 과정에서 필요한 근거가 불완전하거나
+내부적으로 일관되지 않음을 의미하며,
+데이터셋 자체나 파이프라인 실행이 실패했다는 의미는 아니다.
 """
 
 from __future__ import annotations
@@ -15,15 +23,23 @@ from enum import Enum
 from typing import Any
 import uuid
 
+import numpy as np
 import pandas as pd
+from pandas.api.types import (
+    is_bool_dtype,
+    is_datetime64_any_dtype,
+    is_numeric_dtype,
+    is_object_dtype,
+    is_string_dtype,
+)
 
 
 DQ_LINEAGE_COLUMN = "_dq_row_id"
 
 
 class DQAuditStatus(str, Enum):
-    VALID = "VALID"
-    AUDIT_INVALID = "AUDIT_INVALID"
+    CHECK_PASSED = "CHECK_PASSED"
+    CHECK_FAILED = "CHECK_FAILED"
 
 
 class MetricAvailability(str, Enum):
@@ -31,8 +47,14 @@ class MetricAvailability(str, Enum):
     NOT_AVAILABLE = "not_available"
 
 
+class ValidationStatus(str, Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    NOT_APPLICABLE = "N/A"
+
+
 class LineageError(ValueError):
-    """A lineage-based comparison cannot be performed safely."""
+    """A row-tracking comparison cannot be performed safely."""
 
 
 @dataclass(frozen=True)
@@ -45,20 +67,21 @@ class NullTransitionMetrics:
 @dataclass(frozen=True)
 class NullMetrics:
     source_null: int
-    normalization_added_null: int
-    conversion_added_null: int | None
+    nulls_from_normalization: int
+    nulls_from_conversion: int | None
     removed_row_null: int | None
     final_null: int
     normalization_by_column: dict[str, int] = field(default_factory=dict)
     conversion_by_column: dict[str, int] = field(default_factory=dict)
+    removed_row_null_by_column: dict[str, int] = field(default_factory=dict)
     not_available: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
-class LineageMetrics:
+class RowTrackingMetrics:
     column: str
     available: bool
-    valid: bool
+    passed: bool
     raw_rows: int
     processed_rows: int
     missing_ids: int | None
@@ -68,15 +91,15 @@ class LineageMetrics:
 
 
 @dataclass(frozen=True)
-class RowReconciliationMetrics:
+class RowCountCheckMetrics:
     raw_rows: int
     processed_rows: int
     removed_rows: int
     explained_removed_rows: int | None
-    unexplained_removed_rows: int | None
+    unexplained_row_loss: int | None
     expected_final: int | None
     actual_final: int
-    reconciliation_matches: bool
+    row_count_matches: bool
     explanation_availability: MetricAvailability
     removal_reasons: dict[str, int] = field(default_factory=dict)
 
@@ -94,20 +117,58 @@ class DedupMetrics:
 
 @dataclass(frozen=True)
 class NeedsReviewMetrics:
-    needs_review_rows: int
+    rows_needing_review: int
     review_reasons: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ValidationSummaryItem:
+    rule: str
+    expected: Any
+    observed: Any
+    status: ValidationStatus
+
+
+@dataclass(frozen=True)
+class ColumnStatistics:
+    dtype: str
+    rows: int
+    null_count: int
+    null_rate: float
+    non_null_count: int
+    unique_count: int
+    unique_rate: float
+    numeric_min: int | float | None = None
+    numeric_max: int | float | None = None
+    numeric_mean: float | None = None
+    numeric_median: float | None = None
+    infinite_count: int | None = None
+    datetime_min: str | None = None
+    datetime_max: str | None = None
+    string_min_length: int | None = None
+    string_max_length: int | None = None
+    empty_count: int | None = None
+
+
+@dataclass(frozen=True)
+class ColumnProfile:
+    column: str
+    raw: ColumnStatistics | None
+    processed: ColumnStatistics | None
 
 
 @dataclass(frozen=True)
 class DQProfileResult:
     dataset: str
     status: DQAuditStatus
-    lineage: LineageMetrics
+    row_tracking: RowTrackingMetrics
     nulls: NullMetrics
-    rows: RowReconciliationMetrics
+    rows: RowCountCheckMetrics
     dedup: DedupMetrics
     needs_review: NeedsReviewMetrics
     issues: tuple[str, ...] = ()
+    validation_summary: tuple[ValidationSummaryItem, ...] = ()
+    column_profiles: dict[str, ColumnProfile] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly representation for logs or future storage."""
@@ -122,6 +183,177 @@ class DQProfileResult:
             return value
 
         return serialize(asdict(self))
+
+
+def render_dq_audit_report(result: DQProfileResult) -> str:
+    """DQ 프로파일을 사람이 읽기 쉬운 감사 보고서로 변환한다."""
+
+    row_tracking = result.row_tracking
+    rows = result.rows
+    nulls = result.nulls
+    dedup = result.dedup
+    needs_review = result.needs_review
+
+    lines = [
+        "",
+        "=" * 72,
+        f"[데이터 품질 감사 보고서 / DATA QUALITY AUDIT] {result.dataset}",
+        "=" * 72,
+        "",
+        "1. Validation Summary",
+        "-" * 72,
+        "RULE | EXPECTED | OBSERVED | RESULT",
+    ]
+
+    for item in result.validation_summary:
+        expected = _compact_value(item.expected)
+        observed = _compact_value(item.observed)
+        lines.append(
+            f"{item.rule} | {expected} | {observed} | {item.status.value}"
+        )
+
+    lines.extend(
+        [
+            "",
+            "2. Row Transformation",
+            "-" * 72,
+            f"raw={rows.raw_rows} removed={rows.removed_rows} "
+            f"explained={_display_value(rows.explained_removed_rows)} "
+            f"expected_final={_display_value(rows.expected_final)} "
+            f"actual={rows.actual_final} "
+            f"unexplained={_display_value(rows.unexplained_row_loss)}",
+            "tracking: "
+            f"missing={_display_value(row_tracking.missing_ids)} "
+            f"unknown={_display_value(row_tracking.unknown_ids)} "
+            f"null={row_tracking.null_ids} duplicate={row_tracking.duplicate_ids}",
+            "",
+            "3. Missing Value Profile",
+            "-" * 72,
+            f"source={nulls.source_null} "
+            f"normalization={nulls.nulls_from_normalization} "
+            f"conversion={_display_value(nulls.nulls_from_conversion)} "
+            f"removed-row={_display_value(nulls.removed_row_null)} "
+            f"final={nulls.final_null}",
+            "column                  source normalization conversion removed final",
+        ]
+    )
+
+    for column, profile in result.column_profiles.items():
+        source_null = profile.raw.null_count if profile.raw else None
+        final_null = profile.processed.null_count if profile.processed else None
+        lines.append(
+            f"{column:<23.23} {_display_value(source_null):>6} "
+            f"{nulls.normalization_by_column.get(column, 0):>13} "
+            f"{nulls.conversion_by_column.get(column, 0):>10} "
+            f"{_display_value(nulls.removed_row_null_by_column.get(column)):>7} "
+            f"{_display_value(final_null):>5}"
+        )
+
+    lines.extend(
+        [
+            "",
+            "4. Column Profile RAW <-> PROCESSED (Observation)",
+            "-" * 72,
+        ]
+    )
+
+    for column, profile in result.column_profiles.items():
+        lines.append(f"[{column}]")
+        lines.append(f"  RAW       {_format_column_statistics(profile.raw)}")
+        lines.append(f"  PROCESSED {_format_column_statistics(profile.processed)}")
+
+    lines.extend(
+        [
+            "",
+            "5. Duplicate / Needs Review / Issues",
+            "-" * 72,
+            "duplicate: "
+            f"keys={list(dedup.key_columns) or 'N/A'} "
+            f"groups={_display_value(dedup.duplicate_groups)} "
+            f"rows={_display_value(dedup.duplicate_rows)} "
+            f"removed={_display_value(dedup.removed_rows)} "
+            f"identical={_display_value(dedup.identical_payload_groups)} "
+            f"conflicting={_display_value(dedup.conflicting_payload_groups)}",
+            f"needs_review: rows={needs_review.rows_needing_review} "
+            f"reasons={needs_review.review_reasons or '없음'}",
+            "issues:",
+        ]
+    )
+
+    if result.issues:
+        for issue in result.issues:
+            lines.append(f"  - {issue}")
+    else:
+        lines.append("  없음")
+
+    lines.extend(
+        [
+            "",
+            "",
+            "-" * 72,
+            "감사 결과 (Audit Result)",
+            "",
+        ]
+    )
+
+    if result.status == DQAuditStatus.CHECK_PASSED:
+        lines.extend(
+            [
+                "CHECK_PASSED - 통과",
+                "",
+                "행 추적 및 행 수 정합성에 이상이 발견되지 않았습니다.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "CHECK_FAILED - 확인 필요",
+                "",
+                "행 추적 또는 행 수 변화에서 확인이 필요한 문제가 발견되었습니다.",
+                "위의 행 무결성 및 발견된 문제 항목을 확인하세요.",
+            ]
+        )
+
+    lines.append("=" * 72)
+
+    return "\n".join(lines)
+
+
+def _display_value(value: object) -> str:
+    return "N/A" if value is None else str(value)
+
+
+def _compact_value(value: object) -> str:
+    if value is None:
+        return "N/A"
+    if isinstance(value, Mapping):
+        return ",".join(f"{key}={_display_value(item)}" for key, item in value.items())
+    return str(value)
+
+
+def _format_column_statistics(stats: ColumnStatistics | None) -> str:
+    if stats is None:
+        return "N/A"
+    common = (
+        f"dtype={stats.dtype} rows={stats.rows} "
+        f"null={stats.null_count}({stats.null_rate:.2%}) "
+        f"non-null={stats.non_null_count} "
+        f"unique={stats.unique_count}({stats.unique_rate:.2%})"
+    )
+    if stats.infinite_count is not None:
+        return (
+            f"{common} numeric[min={stats.numeric_min}, max={stats.numeric_max}, "
+            f"mean={stats.numeric_mean}, median={stats.numeric_median}, "
+            f"infinite={stats.infinite_count}]"
+        )
+    if stats.datetime_min is not None or stats.datetime_max is not None:
+        return f"{common} datetime[min={stats.datetime_min}, max={stats.datetime_max}]"
+    if stats.string_min_length is not None:
+        return (
+            f"{common} string[min_len={stats.string_min_length}, "
+            f"max_len={stats.string_max_length}, empty={stats.empty_count}]"
+        )
+    return common
 
 
 def add_stable_lineage(
@@ -174,18 +406,18 @@ def audit_lineage(
     processed: pd.DataFrame,
     *,
     lineage_column: str = DQ_LINEAGE_COLUMN,
-) -> LineageMetrics:
-    """Validate lineage without treating legitimately removed RAW IDs as errors."""
+) -> RowTrackingMetrics:
+    """Validate row tracking without treating legitimately removed RAW IDs as errors."""
 
     try:
         raw_values, raw_null_ids, raw_duplicate_ids = _lineage_values(
             raw, lineage_column
         )
     except LineageError:
-        return LineageMetrics(
+        return RowTrackingMetrics(
             column=lineage_column,
             available=False,
-            valid=False,
+            passed=False,
             raw_rows=len(raw),
             processed_rows=len(processed),
             missing_ids=None,
@@ -195,10 +427,10 @@ def audit_lineage(
         )
 
     if lineage_column not in processed.columns:
-        return LineageMetrics(
+        return RowTrackingMetrics(
             column=lineage_column,
             available=False,
-            valid=False,
+            passed=False,
             raw_rows=len(raw),
             processed_rows=len(processed),
             missing_ids=None,
@@ -212,19 +444,20 @@ def audit_lineage(
     )
     raw_ids = set(raw_values.dropna().tolist())
     processed_ids = set(processed_values.dropna().tolist())
-    unknown_ids = processed_ids - raw_ids
-    missing_ids = raw_ids - processed_ids
+
+    missing_ids = len(raw_ids - processed_ids)
+    unknown_ids = len(processed_ids - raw_ids)
     null_ids = raw_null_ids + processed_null_ids
     duplicate_ids = raw_duplicate_ids + processed_duplicate_ids
 
-    return LineageMetrics(
+    return RowTrackingMetrics(
         column=lineage_column,
         available=True,
-        valid=(not unknown_ids and null_ids == 0 and duplicate_ids == 0),
+        passed=(not unknown_ids and null_ids == 0 and duplicate_ids == 0),
         raw_rows=len(raw),
         processed_rows=len(processed),
-        missing_ids=len(missing_ids),
-        unknown_ids=len(unknown_ids),
+        missing_ids=missing_ids,
+        unknown_ids=unknown_ids,
         null_ids=null_ids,
         duplicate_ids=duplicate_ids,
     )
@@ -400,24 +633,28 @@ def reconcile_row_counts(
     *,
     removal_reasons: Mapping[str, Iterable[object]] | None = None,
     lineage_column: str = DQ_LINEAGE_COLUMN,
-) -> RowReconciliationMetrics:
-    """Reconcile physical row counts with lineage-backed removal explanations."""
+) -> RowCountCheckMetrics:
+    """Check physical row counts against row-tracking-backed removal explanations."""
 
     raw_rows = len(raw)
     processed_rows = len(processed)
     removed_rows = raw_rows - processed_rows
-    lineage = audit_lineage(raw, processed, lineage_column=lineage_column)
+    row_tracking = audit_lineage(
+        raw,
+        processed,
+        lineage_column=lineage_column,
+    )
 
-    if not lineage.valid or removed_rows < 0:
-        return RowReconciliationMetrics(
+    if not row_tracking.passed or removed_rows < 0:
+        return RowCountCheckMetrics(
             raw_rows=raw_rows,
             processed_rows=processed_rows,
             removed_rows=removed_rows,
             explained_removed_rows=None,
-            unexplained_removed_rows=None,
+            unexplained_row_loss=None,
             expected_final=None,
             actual_final=processed_rows,
-            reconciliation_matches=False,
+            row_count_matches=False,
             explanation_availability=MetricAvailability.NOT_AVAILABLE,
         )
 
@@ -444,15 +681,15 @@ def reconcile_row_counts(
         and expected_final == processed_rows
     )
 
-    return RowReconciliationMetrics(
+    return RowCountCheckMetrics(
         raw_rows=raw_rows,
         processed_rows=processed_rows,
         removed_rows=removed_rows,
         explained_removed_rows=explained,
-        unexplained_removed_rows=unexplained,
+        unexplained_row_loss=unexplained,
         expected_final=expected_final,
         actual_final=processed_rows,
-        reconciliation_matches=matches,
+        row_count_matches=matches,
         explanation_availability=MetricAvailability.AVAILABLE,
         removal_reasons=dict(sorted(reason_counts.items())),
     )
@@ -521,18 +758,19 @@ def calculate_needs_review_metrics(
     """Preserve the existing boolean while allowing future reason counts."""
 
     if "needs_review" in processed.columns:
-        needs_review_rows = int(processed["needs_review"].fillna(False).sum())
+        rows_needing_review = int(processed["needs_review"].fillna(False).sum())
     else:
-        needs_review_rows = 0
+        rows_needing_review = 0
 
     reasons = {
-        reason: len(set(row_ids))
+        str(reason): len(set(row_ids))
         for reason, row_ids in (review_reason_row_ids or {}).items()
     }
     return NeedsReviewMetrics(
-        needs_review_rows=needs_review_rows,
+        rows_needing_review=rows_needing_review,
         review_reasons=dict(sorted(reasons.items())),
     )
+
 
 
 def _count_null_cells(frame: pd.DataFrame) -> int:
@@ -543,13 +781,183 @@ def _count_null_cells(frame: pd.DataFrame) -> int:
 def _removed_row_nulls(
     normalized: pd.DataFrame,
     processed: pd.DataFrame,
-) -> int | None:
-    lineage = audit_lineage(normalized, processed)
-    if not lineage.valid:
-        return None
+) -> tuple[int | None, dict[str, int]]:
+    row_tracking = audit_lineage(normalized, processed)
+    if not row_tracking.passed:
+        return None, {}
+
     processed_ids = set(processed[DQ_LINEAGE_COLUMN].tolist())
-    removed = normalized.loc[~normalized[DQ_LINEAGE_COLUMN].isin(processed_ids)]
-    return _count_null_cells(removed)
+    removed = normalized.loc[
+        ~normalized[DQ_LINEAGE_COLUMN].isin(processed_ids)
+    ]
+    columns = [
+        column for column in removed.columns if column != DQ_LINEAGE_COLUMN
+    ]
+    by_column = {
+        column: int(removed[column].isna().sum())
+        for column in columns
+    }
+    return _count_null_cells(removed), by_column
+
+
+def _plain_scalar(value: object) -> int | float | str | None:
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, (int, float, str)):
+        return value
+    return str(value)
+
+
+def calculate_column_statistics(series: pd.Series) -> ColumnStatistics:
+    """한 컬럼의 관찰값을 JSON 직렬화 가능한 값으로 계산한다."""
+
+    rows = len(series)
+    null_count = int(series.isna().sum())
+    non_null = series.dropna()
+    non_null_count = len(non_null)
+    try:
+        unique_count = int(non_null.nunique(dropna=True))
+    except TypeError:
+        unique_count = int(non_null.astype("string").nunique(dropna=True))
+
+    values: dict[str, object] = {}
+    if is_numeric_dtype(series.dtype) and not is_bool_dtype(series.dtype):
+        numeric = pd.to_numeric(non_null, errors="coerce")
+        numeric_array = numeric.to_numpy(dtype=float, na_value=np.nan)
+        infinite_count = int(np.isinf(numeric_array).sum())
+        finite = numeric.loc[np.isfinite(numeric_array)]
+        values.update(
+            numeric_min=_plain_scalar(finite.min()) if not finite.empty else None,
+            numeric_max=_plain_scalar(finite.max()) if not finite.empty else None,
+            numeric_mean=(float(finite.mean()) if not finite.empty else None),
+            numeric_median=(float(finite.median()) if not finite.empty else None),
+            infinite_count=infinite_count,
+        )
+    elif is_datetime64_any_dtype(series.dtype):
+        values.update(
+            datetime_min=_plain_scalar(non_null.min()) if not non_null.empty else None,
+            datetime_max=_plain_scalar(non_null.max()) if not non_null.empty else None,
+        )
+    elif is_string_dtype(series.dtype) or is_object_dtype(series.dtype):
+        strings = non_null.astype("string")
+        lengths = strings.str.len()
+        values.update(
+            string_min_length=(int(lengths.min()) if not lengths.empty else None),
+            string_max_length=(int(lengths.max()) if not lengths.empty else None),
+            empty_count=int(strings.str.strip().eq("").sum()),
+        )
+
+    return ColumnStatistics(
+        dtype=str(series.dtype),
+        rows=rows,
+        null_count=null_count,
+        null_rate=(null_count / rows if rows else 0.0),
+        non_null_count=non_null_count,
+        unique_count=unique_count,
+        unique_rate=(unique_count / non_null_count if non_null_count else 0.0),
+        **values,
+    )
+
+
+def build_column_profiles(
+    raw: pd.DataFrame,
+    processed: pd.DataFrame,
+) -> dict[str, ColumnProfile]:
+    """RAW/PROCESSED 컬럼별 기술 통계를 만든다(판정에는 사용하지 않음)."""
+
+    columns = [
+        column
+        for column in dict.fromkeys([*raw.columns, *processed.columns])
+        if column != DQ_LINEAGE_COLUMN
+    ]
+    return {
+        column: ColumnProfile(
+            column=column,
+            raw=(
+                calculate_column_statistics(raw[column])
+                if column in raw.columns
+                else None
+            ),
+            processed=(
+                calculate_column_statistics(processed[column])
+                if column in processed.columns
+                else None
+            ),
+        )
+        for column in columns
+    }
+
+
+def build_validation_summary(
+    row_tracking: RowTrackingMetrics,
+    rows: RowCountCheckMetrics,
+    nulls: NullMetrics,
+    dedup: DedupMetrics,
+    needs_review: NeedsReviewMetrics,
+) -> tuple[ValidationSummaryItem, ...]:
+    """기존 판정 규칙과 관찰 전용 지표를 명시적으로 구분한다."""
+
+    return (
+        ValidationSummaryItem(
+            rule="row_tracking",
+            expected={"unknown": 0, "null": 0, "duplicate": 0},
+            observed={
+                "missing": row_tracking.missing_ids,
+                "unknown": row_tracking.unknown_ids,
+                "null": row_tracking.null_ids,
+                "duplicate": row_tracking.duplicate_ids,
+            },
+            status=(
+                ValidationStatus.PASS
+                if row_tracking.passed
+                else ValidationStatus.FAIL
+            ),
+        ),
+        ValidationSummaryItem(
+            rule="row_reconciliation",
+            expected=rows.expected_final,
+            observed=rows.actual_final,
+            status=(
+                ValidationStatus.PASS
+                if rows.row_count_matches
+                else ValidationStatus.FAIL
+            ),
+        ),
+        ValidationSummaryItem(
+            rule="null_transition",
+            expected="no configured threshold",
+            observed={
+                "normalization": nulls.nulls_from_normalization,
+                "conversion": nulls.nulls_from_conversion,
+            },
+            status=ValidationStatus.NOT_APPLICABLE,
+        ),
+        ValidationSummaryItem(
+            rule="dedup",
+            expected="no configured rule",
+            observed={
+                "keys": list(dedup.key_columns),
+                "duplicate_rows": dedup.duplicate_rows,
+            },
+            status=ValidationStatus.NOT_APPLICABLE,
+        ),
+        ValidationSummaryItem(
+            rule="needs_review",
+            expected="no configured threshold",
+            observed=needs_review.rows_needing_review,
+            status=ValidationStatus.NOT_APPLICABLE,
+        ),
+        ValidationSummaryItem(
+            rule="column_profile",
+            expected="observation only",
+            observed="see section 4",
+            status=ValidationStatus.NOT_APPLICABLE,
+        ),
+    )
 
 
 def profile_processor_run(
@@ -557,10 +965,10 @@ def profile_processor_run(
     raw: pd.DataFrame,
     processor: Callable[[pd.DataFrame], pd.DataFrame],
     normalizer: Callable[[pd.DataFrame], pd.DataFrame],
-    *,
+    dedup_keys: Iterable[str] | None = None,
     removal_reasons: Mapping[str, Iterable[object]] | None = None,
 ) -> tuple[pd.DataFrame, DQProfileResult]:
-    """Run a processor with audit lineage and return a persistence-safe frame."""
+    """Run a processor with row tracking and return a persistence-safe frame."""
 
     lineaged_raw = add_stable_lineage(raw)
     normalized = normalizer(lineaged_raw)
@@ -570,7 +978,7 @@ def profile_processor_run(
     with collect_conversion_losses(conversion_collector):
         processed_with_lineage = processor(lineaged_raw)
 
-    lineage = audit_lineage(lineaged_raw, processed_with_lineage)
+    row_tracking = audit_lineage(lineaged_raw, processed_with_lineage)
     rows = reconcile_row_counts(
         lineaged_raw,
         processed_with_lineage,
@@ -579,42 +987,51 @@ def profile_processor_run(
     conversion = conversion_collector.metrics()
     conversion_available = not conversion_collector.issues
     issues = list(conversion_collector.issues)
-    if not lineage.available:
+
+    if not row_tracking.available:
         issues.append("processor output did not preserve _dq_row_id")
-    elif not lineage.valid:
-        issues.append("processor output contains invalid lineage IDs")
-    if not rows.reconciliation_matches:
-        issues.append("row-count reconciliation is invalid")
+    elif not row_tracking.passed:
+        issues.append("processor output contains invalid row-tracking IDs")
+
+    if not rows.row_count_matches:
+        issues.append("row count check failed")
 
     status = (
-        DQAuditStatus.VALID
-        if lineage.valid and rows.reconciliation_matches
-        else DQAuditStatus.AUDIT_INVALID
+        DQAuditStatus.CHECK_PASSED
+        if row_tracking.passed and rows.row_count_matches
+        else DQAuditStatus.CHECK_FAILED
+    )
+
+    removed_row_null, removed_row_null_by_column = _removed_row_nulls(
+        normalized,
+        processed_with_lineage,
     )
     nulls = NullMetrics(
         source_null=_count_null_cells(lineaged_raw),
-        normalization_added_null=normalization.total,
-        conversion_added_null=conversion.total if conversion_available else None,
-        removed_row_null=_removed_row_nulls(normalized, processed_with_lineage),
+        nulls_from_normalization=normalization.total,
+        nulls_from_conversion=conversion.total if conversion_available else None,
+        removed_row_null=removed_row_null,
         final_null=_count_null_cells(processed_with_lineage),
         normalization_by_column=normalization.by_column,
         conversion_by_column=conversion.by_column,
+        removed_row_null_by_column=removed_row_null_by_column,
         not_available=tuple(
             metric
             for metric, unavailable in (
-                ("conversion_added_null", not conversion_available),
-                ("removed_row_null", not lineage.valid),
+                ("nulls_from_conversion", not conversion_available),
+                ("removed_row_null", not row_tracking.passed),
             )
             if unavailable
         ),
     )
-    result = DQProfileResult(
-        dataset=dataset,
-        status=status,
-        lineage=lineage,
-        nulls=nulls,
-        rows=rows,
-        dedup=DedupMetrics(
+
+    dedup = (
+        calculate_dedup_metrics(
+            processed_with_lineage,
+            tuple(dedup_keys),
+        )
+        if dedup_keys
+        else DedupMetrics(
             key_columns=(),
             duplicate_groups=None,
             duplicate_rows=None,
@@ -622,8 +1039,30 @@ def profile_processor_run(
             identical_payload_groups=None,
             conflicting_payload_groups=None,
             availability=MetricAvailability.NOT_AVAILABLE,
-        ),
-        needs_review=calculate_needs_review_metrics(processed_with_lineage),
-        issues=tuple(dict.fromkeys(issues)),
+        )
     )
+    needs_review = calculate_needs_review_metrics(processed_with_lineage)
+
+    result = DQProfileResult(
+        dataset=dataset,
+        status=status,
+        row_tracking=row_tracking,
+        nulls=nulls,
+        rows=rows,
+        dedup=dedup,
+        needs_review=needs_review,
+        issues=tuple(dict.fromkeys(issues)),
+        validation_summary=build_validation_summary(
+            row_tracking,
+            rows,
+            nulls,
+            dedup,
+            needs_review,
+        ),
+        column_profiles=build_column_profiles(
+            lineaged_raw,
+            processed_with_lineage,
+        ),
+    )
+
     return remove_stable_lineage(processed_with_lineage), result

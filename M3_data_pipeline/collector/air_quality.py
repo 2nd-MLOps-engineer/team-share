@@ -1,12 +1,21 @@
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import unquote
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
+import sys
+import threading
 import time
 
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+
+PIPELINE_DIR = Path(__file__).resolve().parents[1]
+if str(PIPELINE_DIR) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_DIR))
+
+from pipeline_elt import replace_raw_dataset_group
 
 
 # =========================================================
@@ -15,12 +24,6 @@ from dotenv import load_dotenv
 
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent.parent
-
-RAW_DIR = PROJECT_ROOT / "data" / "raw" / "air_quality"
-RAW_DIR.mkdir(parents=True, exist_ok=True)
-
-OUTPUT_FILE = RAW_DIR / "air_quality_all.csv"
-
 
 # =========================================================
 # 2. ENV 파일 찾기
@@ -45,7 +48,7 @@ if ENV_FILE is None:
         ".env 또는 collector.env 파일을 찾을 수 없습니다."
     )
 
-load_dotenv(ENV_FILE, override=True)
+load_dotenv(ENV_FILE, override=False)
 
 print("ENV 파일:", ENV_FILE)
 
@@ -61,7 +64,6 @@ if not API_KEY_RAW:
         "AIRKOREA_API_KEY가 ENV 파일에 없습니다."
     )
 
-# 공공데이터포털 Encoding 인증키 사용
 API_KEY = unquote(API_KEY_RAW)
 
 print("AIRKOREA_API_KEY: 확인됨")
@@ -96,11 +98,15 @@ SIDO_LIST = [
     "세종",
 ]
 
-# 지역별 최대 호출 횟수
 MAX_RETRIES = 3
-
-# 재시도 대기 시간
 RETRY_WAIT_SECONDS = [3, 5]
+
+# 시도 단위 동시 수집 수
+# 첫 benchmark는 6으로 시작
+MAX_WORKERS = 6
+
+# 각 thread가 자기 Session을 재사용
+_thread_local = threading.local()
 
 
 # =========================================================
@@ -124,7 +130,20 @@ WANTED_COLUMNS = [
 
 
 # =========================================================
-# 6. API 1회 호출 함수
+# 6. Thread별 HTTP Session
+# =========================================================
+
+def get_session():
+
+    if not hasattr(_thread_local, "session"):
+
+        _thread_local.session = requests.Session()
+
+    return _thread_local.session
+
+
+# =========================================================
+# 7. API 1회 호출 함수
 # =========================================================
 
 def request_sido(sido_name):
@@ -138,7 +157,9 @@ def request_sido(sido_name):
         "ver": "1.0",
     }
 
-    response = requests.get(
+    session = get_session()
+
+    response = session.get(
         BASE_URL,
         params=params,
         timeout=30,
@@ -162,12 +183,12 @@ def request_sido(sido_name):
 
         return None
 
-
     # -----------------------------------------------------
     # JSON 변환
     # -----------------------------------------------------
 
     try:
+
         data = response.json()
 
     except Exception:
@@ -181,7 +202,6 @@ def request_sido(sido_name):
         )
 
         return None
-
 
     # -----------------------------------------------------
     # API 결과 코드 확인
@@ -212,17 +232,22 @@ def request_sido(sido_name):
 
         return None
 
-
     # -----------------------------------------------------
     # 데이터 추출
     # -----------------------------------------------------
 
-    items = (
+    body = (
         data
         .get("response", {})
         .get("body", {})
-        .get("items", [])
     )
+
+    items = body.get("items", [])
+
+
+    # -----------------------------------------------------
+    # 데이터 0건 확인
+    # -----------------------------------------------------
 
     if not items:
 
@@ -232,7 +257,6 @@ def request_sido(sido_name):
 
         return None
 
-
     # -----------------------------------------------------
     # DataFrame 생성
     # -----------------------------------------------------
@@ -240,14 +264,12 @@ def request_sido(sido_name):
     df = pd.DataFrame(items)
 
     df["sidoName"] = sido_name
-
     df["data_type"] = "air_quality"
 
     df["collected_at"] = (
         datetime.now()
         .strftime("%Y-%m-%d %H:%M:%S")
     )
-
 
     # -----------------------------------------------------
     # 없는 컬럼이 있어도 오류 방지
@@ -258,14 +280,13 @@ def request_sido(sido_name):
         if column not in df.columns:
             df[column] = None
 
-
     df = df[WANTED_COLUMNS]
 
     return df
 
 
 # =========================================================
-# 7. 지역별 재시도 포함 수집 함수
+# 8. 지역별 재시도 포함 수집 함수
 # =========================================================
 
 def collect_sido_with_retry(sido_name):
@@ -278,7 +299,8 @@ def collect_sido_with_retry(sido_name):
     for attempt in range(1, MAX_RETRIES + 1):
 
         print(
-            f"[{sido_name}] 수집 시도 {attempt}/{MAX_RETRIES}"
+            f"[{sido_name}] 수집 시도 "
+            f"{attempt}/{MAX_RETRIES}"
         )
 
         try:
@@ -290,18 +312,16 @@ def collect_sido_with_retry(sido_name):
                 print(
                     f"[{sido_name}] 수집 성공:",
                     len(df),
-                    "건"
+                    "건",
                 )
 
                 return df
-
 
         except requests.exceptions.Timeout:
 
             print(
                 f"[{sido_name}] 요청 시간 초과"
             )
-
 
         except requests.exceptions.RequestException as e:
 
@@ -310,14 +330,12 @@ def collect_sido_with_retry(sido_name):
                 e,
             )
 
-
         except Exception as e:
 
             print(
                 f"[{sido_name}] 예상하지 못한 오류:",
                 e,
             )
-
 
         # -------------------------------------------------
         # 마지막 시도가 아니면 대기 후 재시도
@@ -336,7 +354,6 @@ def collect_sido_with_retry(sido_name):
 
             time.sleep(wait_seconds)
 
-
     print(
         f"[{sido_name}] "
         f"{MAX_RETRIES}회 모두 실패"
@@ -346,77 +363,214 @@ def collect_sido_with_retry(sido_name):
 
 
 # =========================================================
-# 8. 전국 수집 시작
+# 9. 전국 병렬 수집
 # =========================================================
 
-print()
-print("=" * 60)
-print("에어코리아 전국 실시간 대기질 수집 시작")
-print("=" * 60)
+def collect_all_sidos():
 
-all_data = []
+    print()
+    print("=" * 60)
+    print("에어코리아 전국 실시간 대기질 수집 시작")
+    print("=" * 60)
 
-success_sido = []
-failed_sido = []
+    started = time.perf_counter()
 
+    results_by_sido = {}
+    success_sido = []
+    failed_sido = []
 
-for sido in SIDO_LIST:
+    with ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
 
-    sido_df = collect_sido_with_retry(sido)
+        future_to_sido = {
+            executor.submit(
+                collect_sido_with_retry,
+                sido,
+            ): sido
+            for sido in SIDO_LIST
+        }
 
-    if sido_df is not None and not sido_df.empty:
+        for future in as_completed(
+            future_to_sido
+        ):
 
-        all_data.append(sido_df)
+            sido = future_to_sido[future]
 
-        success_sido.append(sido)
+            try:
 
-    else:
+                sido_df = future.result()
 
-        failed_sido.append(sido)
+                if (
+                    sido_df is not None
+                    and not sido_df.empty
+                ):
 
+                    results_by_sido[sido] = sido_df
+                    success_sido.append(sido)
 
-    # 지역과 지역 사이에도 잠깐 대기
-    time.sleep(0.5)
+                else:
 
-if failed_sido:
-    raise RuntimeError(
-        "재시도 후에도 수집하지 못한 시도가 있습니다: "
-        + ", ".join(failed_sido)
+                    failed_sido.append(sido)
+
+            except Exception as e:
+
+                print(
+                    f"[{sido}] Future 처리 실패:",
+                    e,
+                )
+
+                failed_sido.append(sido)
+
+    elapsed = time.perf_counter() - started
+
+    # -----------------------------------------------------
+    # 출력 순서를 SIDO_LIST 기준으로 고정
+    # -----------------------------------------------------
+
+    success_sido = [
+        sido
+        for sido in SIDO_LIST
+        if sido in success_sido
+    ]
+
+    failed_sido = [
+        sido
+        for sido in SIDO_LIST
+        if sido in failed_sido
+    ]
+
+    # -----------------------------------------------------
+    # 하나라도 실패하면 기존 RAW DB snapshot 보호
+    # -----------------------------------------------------
+
+    if failed_sido:
+
+        print()
+        print("=" * 60)
+        print("전국 대기질 수집 실패")
+        print("=" * 60)
+
+        print(
+            "MAX_WORKERS:",
+            MAX_WORKERS,
+        )
+
+        print(
+            "전체 시도 수:",
+            len(SIDO_LIST),
+        )
+
+        print(
+            "성공 시도 수:",
+            len(success_sido),
+        )
+
+        print(
+            "실패 시도 수:",
+            len(failed_sido),
+        )
+
+        print(
+            "실패 시도:",
+            failed_sido,
+        )
+
+        print(
+            f"wall-clock: "
+            f"{elapsed:.2f}초 / "
+            f"{elapsed / 60:.2f}분"
+        )
+
+        print(
+            "기존 정상 RAW DB snapshot은 "
+            "덮어쓰지 않습니다."
+        )
+
+        raise RuntimeError(
+            "재시도 후에도 수집하지 못한 "
+            "시도가 있습니다: "
+            + ", ".join(failed_sido)
+        )
+
+    # -----------------------------------------------------
+    # 데이터 존재 여부 확인
+    # -----------------------------------------------------
+
+    if not results_by_sido:
+
+        raise RuntimeError(
+            "전국 대기질 데이터를 "
+            "한 건도 수집하지 못했습니다."
+        )
+
+    # -----------------------------------------------------
+    # SIDO_LIST 순서로 합치기
+    # -----------------------------------------------------
+
+    ordered_frames = [
+        results_by_sido[sido]
+        for sido in SIDO_LIST
+    ]
+
+    df_all = pd.concat(
+        ordered_frames,
+        ignore_index=True,
+    )
+
+    # -----------------------------------------------------
+    # 병렬 completion 순서와 무관한 deterministic output
+    # -----------------------------------------------------
+
+    sort_columns = [
+        column
+        for column in [
+            "sidoName",
+            "stationName",
+            "dataTime",
+        ]
+        if column in df_all.columns
+    ]
+
+    if sort_columns:
+
+        df_all = (
+            df_all
+            .sort_values(
+                sort_columns,
+                kind="stable",
+                na_position="last",
+            )
+            .reset_index(drop=True)
+        )
+
+    return (
+        df_all,
+        success_sido,
+        failed_sido,
+        elapsed,
     )
 
 
 # =========================================================
-# 9. 데이터 존재 여부 확인
+# 10. 실행
 # =========================================================
 
-if not all_data:
-
-    raise RuntimeError(
-        "전국 대기질 데이터를 한 건도 수집하지 못했습니다."
-    )
+(
+    df_all,
+    success_sido,
+    failed_sido,
+    elapsed,
+) = collect_all_sidos()
 
 
 # =========================================================
-# 10. 전국 데이터 합치기
+# 11. RAW DB 저장
 # =========================================================
 
-df_all = pd.concat(
-    all_data,
-    ignore_index=True,
+replace_raw_dataset_group(
+    {"air_quality": df_all}
 )
-
-
-# =========================================================
-# 11. CSV 저장
-# =========================================================
-
-temporary_file = OUTPUT_FILE.with_suffix(".tmp.csv")
-df_all.to_csv(
-    temporary_file,
-    index=False,
-    encoding="utf-8-sig",
-)
-temporary_file.replace(OUTPUT_FILE)
 
 
 # =========================================================
@@ -428,21 +582,47 @@ print("=" * 60)
 print("전국 대기질 수집 완료")
 print("=" * 60)
 
-print()
-print("저장 파일:")
-print(OUTPUT_FILE)
+print(
+    "MAX_WORKERS:",
+    MAX_WORKERS,
+)
+
+print(
+    "전체 시도 수:",
+    len(SIDO_LIST),
+)
+
+print(
+    "성공 시도 수:",
+    len(success_sido),
+)
+
+print(
+    "실패 시도 수:",
+    len(failed_sido),
+)
+
+print(
+    "실패 시도:",
+    failed_sido,
+)
+
+print(
+    "전체 건수:",
+    len(df_all),
+)
+
+print(
+    f"전체 wall-clock: "
+    f"{elapsed / 60:.2f}분"
+)
 
 print()
-print("전체 건수:")
-print(len(df_all))
+print("RAW DB 저장: raw.air_quality")
 
 print()
 print("성공 시도:")
 print(success_sido)
-
-print()
-print("실패 시도:")
-print(failed_sido)
 
 print()
 print("시도별 건수:")
@@ -461,25 +641,7 @@ print(
     df_all.columns.tolist()
 )
 
-
-# =========================================================
-# 13. 최종 상태
-# =========================================================
-
 print()
 print("=" * 60)
-
-if not failed_sido:
-
-    print("최종 상태: 전국 17개 시도 수집 성공")
-
-else:
-
-    print("최종 상태: 일부 지역 수집 실패")
-
-    print(
-        "최종 실패 지역:",
-        ", ".join(failed_sido)
-    )
-
+print("최종 상태: 전국 17개 시도 수집 성공")
 print("=" * 60)
