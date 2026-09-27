@@ -259,7 +259,7 @@ STATIC_DATASETS = (
     DatasetSpec(
         name="bus_stop",
         collector_script="collector/busstop_api.py",
-        default_cron="0 3 30 * *",
+        default_cron="0 3 28 * *",
         tables=(
             TableSpec(
                 table="bus_stop",
