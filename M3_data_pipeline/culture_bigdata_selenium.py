@@ -2,17 +2,19 @@
 
 ``collector/.env``의 ``CULTURE_ID``와 ``CULTURE_PASSWORD``로 로그인한 뒤,
 상품 상세 페이지에서 CSV 배포 파일만 선택하고 활용목적/필수약관 팝업을
-처리한다. 다운로드한 원본은 수정하지 않고 보존하며, CSV 구조를 검증한 뒤
-``woosimwoonkka`` 데이터베이스의 ``raw`` 스키마에 원자적으로 교체 적재하고,
-SQL 기반 정제 결과를 ``processed`` 스키마에 원자적으로 교체 적재한다.
+처리한다. 다운로드한 원본은 수정하지 않고 스트리밍으로 검증한 뒤
+``woosimwoonkka`` 데이터베이스의 ``raw`` 스키마에 원자적으로 교체 적재한다.
+운영 다운로드는 최종 DB 검증 후 삭제하며 ``--keep-downloads``와
+``--load-only``로 원본 보존/재적재가 가능하다. 정제와 ``processed`` 적재는
+공통 generic pipeline이 담당한다.
 
 기본 실행은 설정된 상품을 차례대로 내려받는다::
 
-    python M3_data_pipeline/bigdata_culture_selenium.py
+    python M3_data_pipeline/culture_bigdata_selenium.py
 
 특정 상품만 실행하려면 ``--url``을 지정한다::
 
-    python M3_data_pipeline/bigdata_culture_selenium.py --url "https://..."
+    python M3_data_pipeline/culture_bigdata_selenium.py --url "https://..."
 """
 
 from __future__ import annotations
@@ -86,26 +88,7 @@ PURPOSE_CODES = {
 }
 TEMPORARY_SUFFIXES = {".crdownload", ".part", ".tmp"}
 RAW_SCHEMA = "raw"
-PROCESSED_SCHEMA = "processed"
 EXPECTED_DB_NAME = "woosimwoonkka"
-KOREA_LATITUDE_RANGE = (33.0, 39.0)
-KOREA_LONGITUDE_RANGE = (124.0, 132.0)
-NULL_LITERALS = (
-    "",
-    "-",
-    "--",
-    "null",
-    "none",
-    "n/a",
-    "na",
-    "n.a.",
-    "정보없음",
-    "정보 없음",
-    "미상",
-)
-NUMERIC_PATTERN = (
-    r"^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$"
-)
 PRODUCT_TABLES = {
     "b5880ea0-247a-4258-9f7b-79eab6751591": (
         "culture_public_sports_facilities"
@@ -161,50 +144,6 @@ PRODUCT_FILE_STEMS = {
     ),
 }
 
-# (latitude, longitude) 순서다. required 좌표가 유효하지 않은 행만 제외하고,
-# 프로그램 데이터의 선택적 인접 교통 좌표는 숫자 변환 실패 시 NULL로 둔다.
-TABLE_COORDINATES = {
-    "culture_public_sports_facilities": {
-        "required": (("FCLTY_LA", "FCLTY_LO"),),
-        "optional": (),
-    },
-    "culture_public_sports_facility_programs": {
-        "required": (("FCLTY_LA", "FCLTY_LO"),),
-        "optional": tuple(
-            (f"PBTRNSP_FCLTY_{rank}R_LA", f"PBTRNSP_FCLTY_{rank}R_LO")
-            for rank in range(1, 6)
-        ),
-    },
-    "culture_sports_facility_nearby_public_transport": {
-        "required": (
-            ("ALSFC_LA", "ALSFC_LO"),
-            ("PBTRNSP_FCLTY_LA", "PBTRNSP_FCLTY_LO"),
-        ),
-        "optional": (),
-    },
-    "culture_national_sports_facility_status": {
-        "required": (("FCLTY_LA", "FCLTY_LO"),),
-        "optional": (),
-    },
-    "culture_location_fitness_measurement_prescriptions": {
-        "required": (("CNTER_LA", "CNTER_LO"),),
-        "optional": (),
-    },
-    "culture_open_school_sports_facilities": {
-        "required": (),
-        "optional": (),
-    },
-    "culture_sports_facility_safety_inspections": {
-        "required": (("FCLTY_CRDNT_LA", "FCLTY_CRDNT_LO"),),
-        "optional": (),
-    },
-    "culture_fitness_measurement_prescriptions": {
-        "required": (),
-        "optional": (),
-    },
-}
-
-
 @dataclass(frozen=True)
 class DownloadedFile:
     product_id: str
@@ -237,17 +176,6 @@ class DatabaseLoad:
     table: str
     csv_row_count: int
     db_row_count: int
-
-
-@dataclass(frozen=True)
-class ProcessedLoad:
-    schema: str
-    table: str
-    raw_row_count: int
-    processed_row_count: int
-    null_conversion_count: int
-    coordinate_missing_removed: int
-    coordinate_range_removed: int
 
 
 class AutomationError(RuntimeError):
@@ -946,429 +874,150 @@ def table_row_count(cursor, table_name: str) -> int:
     return int(cursor.fetchone()[0])
 
 
-def schema_table_row_count(cursor, schema_name: str, table_name: str) -> int:
-    cursor.execute(
-        sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
-            sql.Identifier(schema_name),
-            sql.Identifier(table_name),
-        )
-    )
-    return int(cursor.fetchone()[0])
-
-
-def table_columns(cursor, schema_name: str, table_name: str) -> tuple[str, ...]:
-    cursor.execute(
-        """
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = %s AND table_name = %s
-        ORDER BY ordinal_position
-        """,
-        (schema_name, table_name),
-    )
-    return tuple(row[0] for row in cursor.fetchall())
-
-
-def normalized_text_expression(column: str):
-    identifier = sql.Identifier(column)
-    null_literals = sql.SQL(", ").join(
-        sql.Literal(value) for value in NULL_LITERALS
-    )
-    return sql.SQL(
-        "CASE WHEN {} IS NULL OR lower(btrim({})) IN ({}) "
-        "THEN NULL ELSE {} END"
-    ).format(identifier, identifier, null_literals, identifier)
-
-
-def numeric_coordinate_expression(column: str):
-    identifier = sql.Identifier(column)
-    normalized = normalized_text_expression(column)
-    return sql.SQL(
-        "CASE WHEN ({}) IS NOT NULL AND btrim({}) ~ {} "
-        "THEN btrim({})::double precision ELSE NULL END"
-    ).format(
-        normalized,
-        identifier,
-        sql.Literal(NUMERIC_PATTERN),
-        identifier,
-    )
-
-
-def joined_predicate(parts, operator: str, default: str):
-    parts = list(parts)
-    if not parts:
-        return sql.SQL(default)
-    return sql.SQL(f" {operator} ").join(
-        sql.SQL("({})").format(part) for part in parts
-    )
-
-
-def load_raw_to_processed(
-    table_name: str,
-    config: DatabaseConfig,
-    logger: logging.Logger,
-) -> ProcessedLoad:
-    """SQL로 NULL/좌표를 정제한 뒤 processed 테이블을 원자 교체한다."""
-
-    try:
-        coordinate_policy = TABLE_COORDINATES[table_name]
-    except KeyError as exc:
-        raise AutomationError(
-            "processed_mapping",
-            f"processed 좌표 정책이 없는 raw 테이블: {table_name}",
-        ) from exc
-
-    required_pairs = coordinate_policy["required"]
-    optional_pairs = coordinate_policy["optional"]
-    coordinate_columns = {
-        column
-        for pair in (*required_pairs, *optional_pairs)
-        for column in pair
-    }
-    staging_table = f"{table_name}__staging"
-    logger.info(
-        "stage=processed_load status=START source=%s.%s target=%s.%s",
-        RAW_SCHEMA,
-        table_name,
-        PROCESSED_SCHEMA,
-        table_name,
-    )
-
-    connection = connect_database(config)
-    try:
-        with connection.transaction():
-            with connection.cursor() as cursor:
-                # raw 교체와 processed 교체 모두 같은 순서로 직렬화한다.
-                cursor.execute(
-                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                    (f"{RAW_SCHEMA}.{table_name}",),
-                )
-                cursor.execute(
-                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                    (f"{PROCESSED_SCHEMA}.{table_name}",),
-                )
-
-                columns = table_columns(cursor, RAW_SCHEMA, table_name)
-                if not columns:
-                    raise AutomationError(
-                        "processed_source",
-                        f"raw 테이블이 없거나 컬럼이 없음: {RAW_SCHEMA}.{table_name}",
-                    )
-                missing_columns = sorted(coordinate_columns - set(columns))
-                if missing_columns:
-                    raise AutomationError(
-                        "processed_mapping",
-                        f"{RAW_SCHEMA}.{table_name}에 좌표 컬럼이 없음: "
-                        f"{missing_columns}",
-                    )
-
-                null_terms = []
-                for column in columns:
-                    if column in coordinate_columns:
-                        null_terms.append(
-                            sql.SQL(
-                                "CASE WHEN {} IS NOT NULL AND {} IS NULL "
-                                "THEN 1 ELSE 0 END"
-                            ).format(
-                                sql.Identifier(column),
-                                numeric_coordinate_expression(column),
-                            )
-                        )
-                    else:
-                        null_terms.append(
-                            sql.SQL(
-                                "CASE WHEN {} IS NOT NULL "
-                                "AND lower(btrim({})) IN ({}) "
-                                "THEN 1 ELSE 0 END"
-                            ).format(
-                                sql.Identifier(column),
-                                sql.Identifier(column),
-                                sql.SQL(", ").join(
-                                    sql.Literal(value)
-                                    for value in NULL_LITERALS
-                                ),
-                            )
-                        )
-                missing_predicate = joined_predicate(
-                    (
-                        sql.SQL("{} IS NULL").format(
-                            numeric_coordinate_expression(column)
-                        )
-                        for pair in required_pairs
-                        for column in pair
-                    ),
-                    "OR",
-                    "FALSE",
-                )
-                range_predicate = joined_predicate(
-                    (
-                        sql.SQL("{} NOT BETWEEN {} AND {}").format(
-                            numeric_coordinate_expression(column),
-                            sql.Literal(
-                                KOREA_LATITUDE_RANGE[0]
-                                if index == 0
-                                else KOREA_LONGITUDE_RANGE[0]
-                            ),
-                            sql.Literal(
-                                KOREA_LATITUDE_RANGE[1]
-                                if index == 0
-                                else KOREA_LONGITUDE_RANGE[1]
-                            ),
-                        )
-                        for pair in required_pairs
-                        for index, column in enumerate(pair)
-                    ),
-                    "OR",
-                    "FALSE",
-                )
-                cursor.execute(
-                    sql.SQL(
-                        "SELECT COUNT(*), COALESCE(SUM({}), 0), "
-                        "COUNT(*) FILTER (WHERE {}), "
-                        "COUNT(*) FILTER (WHERE NOT ({}) AND ({})) "
-                        "FROM {}.{}"
-                    ).format(
-                        sql.SQL(" + ").join(null_terms),
-                        missing_predicate,
-                        missing_predicate,
-                        range_predicate,
-                        sql.Identifier(RAW_SCHEMA),
-                        sql.Identifier(table_name),
-                    )
-                )
-                (
-                    raw_row_count,
-                    null_conversion_count,
-                    coordinate_missing_removed,
-                    coordinate_range_removed,
-                ) = (int(value) for value in cursor.fetchone())
-
-                cursor.execute(
-                    sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
-                        sql.Identifier(PROCESSED_SCHEMA)
-                    )
-                )
-                cursor.execute(
-                    sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
-                        sql.Identifier(PROCESSED_SCHEMA),
-                        sql.Identifier(staging_table),
-                    )
-                )
-                select_columns = [
-                    sql.SQL("{} AS {}").format(
-                        (
-                            numeric_coordinate_expression(column)
-                            if column in coordinate_columns
-                            else normalized_text_expression(column)
-                        ),
-                        sql.Identifier(column),
-                    )
-                    for column in columns
-                ]
-                cursor.execute(
-                    sql.SQL(
-                        "CREATE TABLE {}.{} AS SELECT {} FROM {}.{} "
-                        "WHERE NOT ({}) AND NOT ({})"
-                    ).format(
-                        sql.Identifier(PROCESSED_SCHEMA),
-                        sql.Identifier(staging_table),
-                        sql.SQL(", ").join(select_columns),
-                        sql.Identifier(RAW_SCHEMA),
-                        sql.Identifier(table_name),
-                        missing_predicate,
-                        range_predicate,
-                    )
-                )
-                processed_row_count = schema_table_row_count(
-                    cursor,
-                    PROCESSED_SCHEMA,
-                    staging_table,
-                )
-                expected_count = (
-                    raw_row_count
-                    - coordinate_missing_removed
-                    - coordinate_range_removed
-                )
-                if processed_row_count != expected_count:
-                    raise AutomationError(
-                        "processed_row_count_validation",
-                        f"processed staging 행 수 불일치: raw={raw_row_count}, "
-                        f"missing_removed={coordinate_missing_removed}, "
-                        f"range_removed={coordinate_range_removed}, "
-                        f"expected={expected_count}, actual={processed_row_count}",
-                    )
-
-                cursor.execute(
-                    sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
-                        sql.Identifier(PROCESSED_SCHEMA),
-                        sql.Identifier(table_name),
-                    )
-                )
-                cursor.execute(
-                    sql.SQL("ALTER TABLE {}.{} RENAME TO {}").format(
-                        sql.Identifier(PROCESSED_SCHEMA),
-                        sql.Identifier(staging_table),
-                        sql.Identifier(table_name),
-                    )
-                )
-
-        with connection.cursor() as cursor:
-            committed_count = schema_table_row_count(
-                cursor,
-                PROCESSED_SCHEMA,
-                table_name,
-            )
-        if committed_count != processed_row_count:
-            raise AutomationError(
-                "processed_row_count_validation",
-                f"커밋 후 processed 행 수 불일치: "
-                f"before={processed_row_count}, after={committed_count}",
-            )
-    except AutomationError:
-        raise
-    except Exception as exc:
-        raise AutomationError(
-            "processed_load",
-            f"{RAW_SCHEMA}.{table_name} → {PROCESSED_SCHEMA}.{table_name} "
-            f"변환 실패: {exc}",
-        ) from exc
-    finally:
-        connection.close()
-
-    logger.info(
-        "stage=processed_load status=OK source=%s.%s target=%s.%s "
-        "raw_rows=%s processed_rows=%s null_conversions=%s "
-        "coordinate_missing_removed=%s coordinate_range_removed=%s",
-        RAW_SCHEMA,
-        table_name,
-        PROCESSED_SCHEMA,
-        table_name,
-        raw_row_count,
-        committed_count,
-        null_conversion_count,
-        coordinate_missing_removed,
-        coordinate_range_removed,
-    )
-    return ProcessedLoad(
-        schema=PROCESSED_SCHEMA,
-        table=table_name,
-        raw_row_count=raw_row_count,
-        processed_row_count=committed_count,
-        null_conversion_count=null_conversion_count,
-        coordinate_missing_removed=coordinate_missing_removed,
-        coordinate_range_removed=coordinate_range_removed,
-    )
-
-
 def load_csv_to_raw(
     validation: CsvValidation,
     table_name: str,
     config: DatabaseConfig,
     logger: logging.Logger,
 ) -> DatabaseLoad:
-    """스테이징 적재와 행 수 검증 후 대상 raw 테이블을 원자적으로 교체한다."""
+    """단일 CSV용 호환 wrapper."""
 
-    staging_table = f"{table_name}__staging"
-    logger.info(
-        "stage=db_load status=START target=%s.%s csv_rows=%s file=%s",
-        RAW_SCHEMA,
-        table_name,
-        validation.row_count,
-        validation.path,
-    )
+    return load_csv_group_to_raw(
+        ((validation, table_name),),
+        config,
+        logger,
+    )[0]
+
+
+def load_csv_group_to_raw(
+    inputs: Sequence[tuple[CsvValidation, str]],
+    config: DatabaseConfig,
+    logger: logging.Logger,
+) -> list[DatabaseLoad]:
+    """모든 Culture CSV를 하나의 transaction으로 RAW에 교체한다."""
+
+    if not inputs:
+        raise AutomationError("db_mapping", "적재할 Culture CSV가 없음")
+    table_names = [table_name for _validation, table_name in inputs]
+    if len(table_names) != len(set(table_names)):
+        raise AutomationError("db_mapping", "중복된 Culture raw 테이블 매핑")
 
     connection = connect_database(config)
+    committed_counts: dict[str, int] = {}
     try:
         with connection.transaction():
             with connection.cursor() as cursor:
-                # 동일 테이블에 대한 동시 실행을 직렬화한다.
-                cursor.execute(
-                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                    (f"{RAW_SCHEMA}.{table_name}",),
-                )
                 cursor.execute(
                     sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
                         sql.Identifier(RAW_SCHEMA)
                     )
                 )
-                cursor.execute(
-                    sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
-                        sql.Identifier(RAW_SCHEMA),
-                        sql.Identifier(staging_table),
-                    )
-                )
-                create_text_table(cursor, staging_table, validation.columns)
-                copied_rows = copy_csv_rows(cursor, validation, staging_table)
-                staging_count = table_row_count(cursor, staging_table)
 
-                if copied_rows != validation.row_count:
-                    raise AutomationError(
-                        "db_copy_validation",
-                        f"CSV 검증 행 수와 COPY 처리 행 수 불일치: "
-                        f"csv={validation.row_count}, copied={copied_rows}",
-                    )
-                if staging_count != validation.row_count:
-                    raise AutomationError(
-                        "db_copy_validation",
-                        f"CSV와 staging DB 행 수 불일치: "
-                        f"csv={validation.row_count}, db={staging_count}",
+                # 여러 실행이 서로 다른 lock 순서를 잡지 않도록 정렬한다.
+                for table_name in sorted(table_names):
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f"{RAW_SCHEMA}.{table_name}",),
                     )
 
-                # 기존 대상은 새 스테이징 검증이 끝난 뒤 같은 트랜잭션에서만 교체한다.
-                cursor.execute(
-                    sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
-                        sql.Identifier(RAW_SCHEMA),
-                        sql.Identifier(table_name),
+                for validation, table_name in inputs:
+                    staging_table = f"{table_name}__staging"
+                    logger.info(
+                        "stage=db_load status=START target=%s.%s "
+                        "csv_rows=%s file=%s",
+                        RAW_SCHEMA,
+                        table_name,
+                        validation.row_count,
+                        validation.path,
                     )
-                )
-                cursor.execute(
-                    sql.SQL("ALTER TABLE {}.{} RENAME TO {}").format(
-                        sql.Identifier(RAW_SCHEMA),
-                        sql.Identifier(staging_table),
-                        sql.Identifier(table_name),
+                    cursor.execute(
+                        sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
+                            sql.Identifier(RAW_SCHEMA),
+                            sql.Identifier(staging_table),
+                        )
                     )
-                )
-                final_count = table_row_count(cursor, table_name)
-                if final_count != validation.row_count:
+                    create_text_table(cursor, staging_table, validation.columns)
+                    copied_rows = copy_csv_rows(cursor, validation, staging_table)
+                    staging_count = table_row_count(cursor, staging_table)
+                    if copied_rows != validation.row_count:
+                        raise AutomationError(
+                            "db_copy_validation",
+                            f"{table_name}: CSV 검증/COPY 행 수 불일치: "
+                            f"csv={validation.row_count}, copied={copied_rows}",
+                        )
+                    if staging_count != validation.row_count:
+                        raise AutomationError(
+                            "db_copy_validation",
+                            f"{table_name}: CSV/staging 행 수 불일치: "
+                            f"csv={validation.row_count}, db={staging_count}",
+                        )
+
+                # 모든 staging 검증이 끝난 뒤에만 final 전체를 교체한다.
+                for _validation, table_name in inputs:
+                    cursor.execute(
+                        sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
+                            sql.Identifier(RAW_SCHEMA),
+                            sql.Identifier(table_name),
+                        )
+                    )
+                for validation, table_name in inputs:
+                    staging_table = f"{table_name}__staging"
+                    cursor.execute(
+                        sql.SQL("ALTER TABLE {}.{} RENAME TO {}").format(
+                            sql.Identifier(RAW_SCHEMA),
+                            sql.Identifier(staging_table),
+                            sql.Identifier(table_name),
+                        )
+                    )
+                    final_count = table_row_count(cursor, table_name)
+                    if final_count != validation.row_count:
+                        raise AutomationError(
+                            "db_row_count_validation",
+                            f"{table_name}: CSV/final DB 행 수 불일치: "
+                            f"csv={validation.row_count}, db={final_count}",
+                        )
+
+        # commit 뒤 최종 가시 행 수까지 모두 확인된 경우에만 성공을 반환한다.
+        with connection.cursor() as cursor:
+            for validation, table_name in inputs:
+                committed_count = table_row_count(cursor, table_name)
+                if committed_count != validation.row_count:
                     raise AutomationError(
                         "db_row_count_validation",
-                        f"CSV와 최종 DB 행 수 불일치: "
-                        f"csv={validation.row_count}, db={final_count}",
+                        f"{table_name}: 커밋 후 CSV/DB 행 수 불일치: "
+                        f"csv={validation.row_count}, db={committed_count}",
                     )
-
-        # 커밋 이후 별도 조회로 최종 가시 행 수도 다시 확인한다.
-        with connection.cursor() as cursor:
-            committed_count = table_row_count(cursor, table_name)
-        if committed_count != validation.row_count:
-            raise AutomationError(
-                "db_row_count_validation",
-                f"커밋 후 CSV와 DB 행 수 불일치: "
-                f"csv={validation.row_count}, db={committed_count}",
-            )
+                committed_counts[table_name] = committed_count
     except AutomationError:
         raise
     except Exception as exc:
         raise AutomationError(
             "db_load",
-            f"{RAW_SCHEMA}.{table_name} 적재 실패: {exc}",
+            f"Culture RAW dataset 원자 적재 실패: {exc}",
         ) from exc
     finally:
         connection.close()
 
-    logger.info(
-        "stage=db_row_count_validation status=OK target=%s.%s "
-        "csv_rows=%s db_rows=%s",
-        RAW_SCHEMA,
-        table_name,
-        validation.row_count,
-        committed_count,
-    )
-    return DatabaseLoad(
-        schema=RAW_SCHEMA,
-        table=table_name,
-        csv_row_count=validation.row_count,
-        db_row_count=committed_count,
-    )
+    loads = []
+    for validation, table_name in inputs:
+        committed_count = committed_counts[table_name]
+        logger.info(
+            "stage=db_row_count_validation status=OK target=%s.%s "
+            "csv_rows=%s db_rows=%s",
+            RAW_SCHEMA,
+            table_name,
+            validation.row_count,
+            committed_count,
+        )
+        loads.append(
+            DatabaseLoad(
+                schema=RAW_SCHEMA,
+                table=table_name,
+                csv_row_count=validation.row_count,
+                db_row_count=committed_count,
+            )
+        )
+    return loads
 
 
 def download_csv_product(
@@ -1435,6 +1084,45 @@ def download_csv_product(
     return DownloadedFile(item_id, title, path.resolve(), size)
 
 
+def remove_ephemeral_downloads(
+    results: Sequence[DownloadedFile],
+    run_download_dir: Path,
+    logger: logging.Logger,
+) -> None:
+    """성공한 운영 다운로드만 실행 디렉터리 경계 안에서 삭제한다."""
+
+    resolved_directory = run_download_dir.resolve()
+    paths = [result.path.resolve() for result in results]
+    outside = [path for path in paths if path.parent != resolved_directory]
+    if outside:
+        logger.warning(
+            "stage=download_cleanup status=SKIPPED reason=outside_run_directory "
+            "file=%s",
+            outside[0],
+        )
+        return
+
+    for path in paths:
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.warning(
+                "stage=download_cleanup status=KEPT file=%s reason=%r",
+                path,
+                str(exc),
+            )
+        else:
+            logger.info("stage=download_cleanup status=DELETED file=%s", path)
+
+    try:
+        resolved_directory.rmdir()
+    except OSError:
+        logger.info(
+            "stage=download_cleanup status=KEPT_NONEMPTY_DIR directory=%s",
+            resolved_directory,
+        )
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1447,7 +1135,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--download-dir",
         type=Path,
         default=DEFAULT_DOWNLOAD_DIR,
-        help="원본 보존용 실행별 하위 디렉터리를 만들 기준 경로",
+        help="운영 임시 CSV의 실행별 하위 디렉터리를 만들 기준 경로",
     )
     parser.add_argument(
         "--load-only",
@@ -1469,6 +1157,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="상품별 다운로드 완료 대기 초(기본: 3600)",
     )
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--keep-downloads",
+        action="store_true",
+        help="RAW 적재 성공 후에도 다운로드 원본 CSV를 보존",
+    )
     return parser.parse_args(argv)
 
 
@@ -1537,7 +1230,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         # 다운로드 완료 이후 Chrome을 닫아 원본 파일 핸들을 확실히 해제한다.
         validations = [validate_csv(result.path, logger) for result in results]
-        database_loads = []
+        mapped_inputs = []
         for result, validation in zip(results, validations, strict=True):
             try:
                 table_name = PRODUCT_TABLES[result.product_id]
@@ -1546,20 +1239,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "db_mapping",
                     f"raw 테이블 매핑이 없는 상품: {result.product_id}",
                 ) from exc
-            database_loads.append(
-                load_csv_to_raw(
-                    validation=validation,
-                    table_name=table_name,
-                    config=database_config,
-                    logger=logger,
-                )
-            )
+            mapped_inputs.append((validation, table_name))
+
+        database_loads = load_csv_group_to_raw(
+            mapped_inputs,
+            database_config,
+            logger,
+        )
 
         for loaded in database_loads:
             print(
                 f"DB_LOAD_OK table={loaded.schema}.{loaded.table} "
                 f"csv_rows={loaded.csv_row_count} db_rows={loaded.db_row_count}"
             )
+
+        if args.load_only or args.keep_downloads:
+            logger.info(
+                "stage=download_cleanup status=SKIPPED reason=%s directory=%s",
+                "load_only" if args.load_only else "keep_downloads",
+                run_download_dir.resolve(),
+            )
+        else:
+            remove_ephemeral_downloads(results, run_download_dir, logger)
 
         
         logger.info(

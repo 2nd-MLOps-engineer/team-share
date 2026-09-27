@@ -20,9 +20,10 @@ from dq_profiler import (  # noqa: E402
     calculate_null_transitions,
     profile_processor_run,
     reconcile_row_counts,
+    render_dq_audit_report,
     remove_stable_lineage,
 )
-from pipeline_common import process_with_dq_profile  # noqa: E402
+from pipeline_elt import process_with_dq_profile  # noqa: E402
 
 
 class StableLineageTest(unittest.TestCase):
@@ -48,7 +49,7 @@ class StableLineageTest(unittest.TestCase):
 
 
 class NullStageMetricsTest(unittest.TestCase):
-    def test_separates_source_null_and_normalization_added_null(self):
+    def test_separates_source_null_and_nulls_from_normalization(self):
         raw = pd.DataFrame({"value": [None, " - ", "10"]})
 
         processed, result = profile_processor_run(
@@ -59,8 +60,8 @@ class NullStageMetricsTest(unittest.TestCase):
         )
 
         self.assertEqual(result.nulls.source_null, 1)
-        self.assertEqual(result.nulls.normalization_added_null, 1)
-        self.assertEqual(result.nulls.conversion_added_null, 0)
+        self.assertEqual(result.nulls.nulls_from_normalization, 1)
+        self.assertEqual(result.nulls.nulls_from_conversion, 0)
         self.assertEqual(result.nulls.final_null, 2)
         self.assertNotIn(DQ_LINEAGE_COLUMN, processed.columns)
 
@@ -92,7 +93,7 @@ class NullStageMetricsTest(unittest.TestCase):
 
 
 class RowReconciliationTest(unittest.TestCase):
-    def test_splits_explained_and_unexplained_removed_rows(self):
+    def test_splits_explained_and_unexplained_row_loss(self):
         raw = add_stable_lineage(
             pd.DataFrame({"value": [1, 2, 3, 4]}),
             audit_id="rows",
@@ -109,9 +110,9 @@ class RowReconciliationTest(unittest.TestCase):
         self.assertEqual(metric.processed_rows, 2)
         self.assertEqual(metric.removed_rows, 2)
         self.assertEqual(metric.explained_removed_rows, 1)
-        self.assertEqual(metric.unexplained_removed_rows, 1)
+        self.assertEqual(metric.unexplained_row_loss, 1)
         self.assertEqual(metric.expected_final, metric.actual_final)
-        self.assertTrue(metric.reconciliation_matches)
+        self.assertTrue(metric.row_count_matches)
 
     def test_missing_lineage_makes_audit_invalid_not_dataset_failure(self):
         raw = add_stable_lineage(pd.DataFrame({"value": [1, 2]}), audit_id="rows")
@@ -119,8 +120,8 @@ class RowReconciliationTest(unittest.TestCase):
 
         metric = reconcile_row_counts(raw, processed)
 
-        self.assertFalse(metric.reconciliation_matches)
-        self.assertIsNone(metric.unexplained_removed_rows)
+        self.assertFalse(metric.row_count_matches)
+        self.assertIsNone(metric.unexplained_row_loss)
         self.assertEqual(
             metric.explanation_availability,
             MetricAvailability.NOT_AVAILABLE,
@@ -155,8 +156,69 @@ class ExtensibleMetricStructuresTest(unittest.TestCase):
             },
         )
 
-        self.assertEqual(metric.needs_review_rows, 2)
+        self.assertEqual(metric.rows_needing_review, 2)
         self.assertEqual(metric.review_reasons, {"missing_measurement": 2})
+
+
+class HumanAuditReportTest(unittest.TestCase):
+    def test_column_profile_is_observation_and_does_not_change_status(self):
+        raw = pd.DataFrame(
+            {
+                "number": [1.0, float("inf"), None],
+                "text": ["", "abc", None],
+            }
+        )
+
+        processed, result = profile_processor_run(
+            "profile_observation",
+            raw,
+            lambda frame: frame.copy(),
+            normalize_nulls,
+        )
+
+        self.assertEqual(result.status, DQAuditStatus.CHECK_PASSED)
+        self.assertEqual(
+            result.column_profiles["number"].raw.infinite_count,
+            1,
+        )
+        self.assertEqual(result.column_profiles["text"].raw.empty_count, 1)
+        self.assertNotIn(DQ_LINEAGE_COLUMN, result.column_profiles)
+        self.assertNotIn(DQ_LINEAGE_COLUMN, processed.columns)
+
+    def test_report_has_requested_sections_and_na_for_unconfigured_rules(self):
+        _processed, result = profile_processor_run(
+            "report",
+            pd.DataFrame({"value": ["1", "2"]}),
+            lambda frame: frame.copy(),
+            normalize_nulls,
+        )
+
+        report = render_dq_audit_report(result)
+        payload = result.as_dict()
+
+        self.assertIn("1. Validation Summary", report)
+        self.assertIn("2. Row Transformation", report)
+        self.assertIn("3. Missing Value Profile", report)
+        self.assertIn("4. Column Profile RAW <-> PROCESSED", report)
+        self.assertIn("5. Duplicate / Needs Review / Issues", report)
+        self.assertIn("N/A", report)
+        self.assertEqual(payload["status"], "CHECK_PASSED")
+        self.assertIn("row_tracking", payload)
+        self.assertIn("column_profiles", payload)
+
+    def test_missing_value_profile_includes_removed_row_nulls_by_column(self):
+        def remove_null_row(frame):
+            return frame.loc[frame["value"].notna()].copy()
+
+        _processed, result = profile_processor_run(
+            "removed_nulls",
+            pd.DataFrame({"value": [None, "keep"]}),
+            remove_null_row,
+            normalize_nulls,
+        )
+
+        self.assertEqual(result.nulls.removed_row_null, 1)
+        self.assertEqual(result.nulls.removed_row_null_by_column, {"value": 1})
 
 
 class PipelineDQIntegrationTest(unittest.TestCase):
@@ -184,8 +246,8 @@ class PipelineDQIntegrationTest(unittest.TestCase):
         actual, result = process_with_dq_profile("air_quality", raw)
 
         pd.testing.assert_frame_equal(actual, expected)
-        self.assertEqual(result.status, DQAuditStatus.VALID)
-        self.assertEqual(result.nulls.conversion_added_null, 0)
+        self.assertEqual(result.status, DQAuditStatus.CHECK_PASSED)
+        self.assertEqual(result.nulls.nulls_from_conversion, 0)
         self.assertNotIn(DQ_LINEAGE_COLUMN, actual.columns)
 
     def test_processor_column_selection_is_reported_as_audit_invalid(self):
@@ -202,7 +264,7 @@ class PipelineDQIntegrationTest(unittest.TestCase):
         )
 
         self.assertEqual(processed["value"].tolist(), ["keep"])
-        self.assertEqual(result.status, DQAuditStatus.AUDIT_INVALID)
+        self.assertEqual(result.status, DQAuditStatus.CHECK_FAILED)
         self.assertIn("processor output did not preserve _dq_row_id", result.issues)
         self.assertIsNone(result.nulls.removed_row_null)
 
@@ -271,10 +333,25 @@ class PipelineDQIntegrationTest(unittest.TestCase):
         raw = pd.DataFrame(
             {
                 "afos_fid": ["A"],
+                "afos_id": ["2024060"],
+                "bjd_cd": ["1111010100"],
+                "spot_cd": ["1"],
+                "sido_sgg_nm": ["서울 종로구"],
                 "spot_nm": ["테스트 지점"],
+                "request_year": ["2024"],
+                "request_sido": ["11"],
+                "request_gugun": ["110"],
+                "request_province_name": ["서울특별시"],
+                "request_district_name": ["종로구"],
+                "expected_afos_id": ["2024060"],
+                "request_page_no": ["1"],
                 "lo_crd": ["127.0123"],
                 "la_crd": ["37.4567"],
                 "occrrnc_cnt": ["4"],
+                "geom_json": [
+                    '{"type":"Polygon","coordinates":'
+                    '[[[127,37],[127.1,37],[127,37]]]}'
+                ],
                 "collected_at": ["2026-09-26T12:00:00+09:00"],
             }
         )
@@ -288,7 +365,7 @@ class PipelineDQIntegrationTest(unittest.TestCase):
         pd.testing.assert_frame_equal(actual, expected)
         self.assertAlmostEqual(float(actual.loc[0, "longitude"]), 127.0123)
         self.assertAlmostEqual(float(actual.loc[0, "latitude"]), 37.4567)
-        self.assertEqual(result.nulls.conversion_added_null, 0)
+        self.assertEqual(result.nulls.nulls_from_conversion, 0)
 
 
 if __name__ == "__main__":

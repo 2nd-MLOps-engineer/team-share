@@ -57,6 +57,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
+import re
 import time
 
 import pandas as pd
@@ -1151,10 +1153,34 @@ def process_durunubi_trails(
         ),
     )
 
-    if "routeIdx" in frame.columns:
-        frame = deduplicate_valid_keys(
-            frame,
-            ("routeIdx",),
+    # routeIdx는 trail 식별자이므로
+    # NULL/중복을 임의 제거하지 않고 수집 이상으로 처리한다.
+    if "routeIdx" not in frame.columns:
+        raise ValueError(
+            "durunubi_trails: 필수 컬럼 routeIdx가 없습니다."
+        )
+
+    null_key_count = int(
+        frame["routeIdx"].isna().sum()
+    )
+
+    if null_key_count:
+        raise ValueError(
+            "durunubi_trails: "
+            f"routeIdx NULL {null_key_count:,}건 발견"
+        )
+
+    duplicate_count = int(
+        frame.duplicated(
+            subset=["routeIdx"],
+            keep=False,
+        ).sum()
+    )
+
+    if duplicate_count:
+        raise ValueError(
+            "durunubi_trails: "
+            f"routeIdx 중복 행 {duplicate_count:,}건 발견"
         )
 
     add_needs_review(
@@ -1197,13 +1223,57 @@ def process_durunubi_segments(
         ),
     )
 
-    frame = deduplicate_valid_keys(
-        frame,
-        (
-            "routeIdx",
-            "crsIdx",
-        ),
+    # 기존 collector의 무결성 계약 유지:
+    # crsIdx가 segment 자체의 식별자다.
+    required_columns = (
+        "routeIdx",
+        "crsIdx",
     )
+
+    missing_columns = [
+        column
+        for column in required_columns
+        if column not in frame.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            "durunubi_segments: 필수 컬럼 누락: "
+            + ", ".join(missing_columns)
+        )
+
+    null_route_count = int(
+        frame["routeIdx"].isna().sum()
+    )
+
+    if null_route_count:
+        raise ValueError(
+            "durunubi_segments: "
+            f"routeIdx NULL {null_route_count:,}건 발견"
+        )
+
+    null_key_count = int(
+        frame["crsIdx"].isna().sum()
+    )
+
+    if null_key_count:
+        raise ValueError(
+            "durunubi_segments: "
+            f"crsIdx NULL {null_key_count:,}건 발견"
+        )
+
+    duplicate_count = int(
+        frame.duplicated(
+            subset=["crsIdx"],
+            keep=False,
+        ).sum()
+    )
+
+    if duplicate_count:
+        raise ValueError(
+            "durunubi_segments: "
+            f"crsIdx 중복 행 {duplicate_count:,}건 발견"
+        )
 
     add_needs_review(
         frame,
@@ -1260,11 +1330,148 @@ def process_weather_warning(
 # 11. 기상특보 상태
 # ============================================================
 
+WEATHER_WARNING_STATUS_COLUMNS = [
+    "warning_type",
+    "warning_level",
+    "warning_status",
+    "area_name",
+    "area_type",
+    "effective_time",
+    "tmEf",
+    "tmFc",
+    "tmSeq",
+    "collected_at",
+]
+
+
+def _weather_warning_area_type(area_name):
+    if area_name is None:
+        return None
+    return (
+        "SEA"
+        if any(keyword in str(area_name) for keyword in ("앞바다", "먼바다", "해역"))
+        else "LAND"
+    )
+
+
+def _parse_active_weather_warning(latest: pd.Series) -> list[dict]:
+    warning_text = latest.get("t6")
+    if pd.isna(warning_text):
+        return []
+    warning_text = str(warning_text).strip()
+    if not warning_text or re.fullmatch(r"[oO○]?\s*없음", warning_text):
+        return []
+
+    rows = []
+    for line in warning_text.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        left, area_text = line.split(":", 1)
+        left = re.sub(r"^[oO○]\s*", "", left).strip()
+        area_text = area_text.strip()
+        if not area_text:
+            continue
+        warning_type = left
+        warning_level = None
+        if left.endswith("주의보"):
+            warning_type = left[:-3].strip()
+            warning_level = "주의보"
+        elif left.endswith("경보"):
+            warning_type = left[:-2].strip()
+            warning_level = "경보"
+        row = {
+            "warning_type": warning_type,
+            "warning_level": warning_level,
+            "warning_status": "ACTIVE",
+            "area_name": area_text,
+            "area_type": _weather_warning_area_type(area_text),
+            "effective_time": None,
+            "tmEf": latest.get("tmEf"),
+            "tmFc": latest.get("tmFc"),
+            "tmSeq": latest.get("tmSeq"),
+            "collected_at": latest.get("collected_at"),
+        }
+        if DQ_LINEAGE_COLUMN in latest.index:
+            row[DQ_LINEAGE_COLUMN] = latest[DQ_LINEAGE_COLUMN]
+        rows.append(row)
+    return rows
+
+
+def _parse_preliminary_weather_warning(latest: pd.Series) -> list[dict]:
+    warning_text = latest.get("t7")
+    if pd.isna(warning_text):
+        return []
+    warning_text = str(warning_text).strip()
+    if not warning_text or re.fullmatch(r"[oO○]?\s*없음", warning_text):
+        return []
+
+    rows = []
+    current_warning_type = None
+    for line in warning_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "예비특보" in line and re.match(r"^\(\d+\)", line):
+            current_warning_type = re.sub(r"^\(\d+\)\s*", "", line)
+            current_warning_type = current_warning_type.replace("예비특보", "").strip()
+            continue
+        if not re.match(r"^[oO○]\s*", line) or ":" not in line:
+            continue
+        left, area_text = line.split(":", 1)
+        area_text = area_text.strip()
+        if not area_text:
+            continue
+        row = {
+            "warning_type": current_warning_type,
+            "warning_level": "예비특보",
+            "warning_status": "PRELIMINARY",
+            "area_name": area_text,
+            "area_type": _weather_warning_area_type(area_text),
+            "effective_time": re.sub(r"^[oO○]\s*", "", left).strip(),
+            "tmEf": latest.get("tmEf"),
+            "tmFc": latest.get("tmFc"),
+            "tmSeq": latest.get("tmSeq"),
+            "collected_at": latest.get("collected_at"),
+        }
+        if DQ_LINEAGE_COLUMN in latest.index:
+            row[DQ_LINEAGE_COLUMN] = latest[DQ_LINEAGE_COLUMN]
+        rows.append(row)
+    return rows
+
 def process_weather_warning_status(
     raw: pd.DataFrame,
 ) -> pd.DataFrame:
 
-    frame = normalize_nulls(raw)
+    if raw.empty:
+        columns = WEATHER_WARNING_STATUS_COLUMNS.copy()
+        if DQ_LINEAGE_COLUMN in raw.columns:
+            columns.append(DQ_LINEAGE_COLUMN)
+        return pd.DataFrame(columns=columns)
+
+    required = {"t6", "t7", "tmFc", "tmSeq"}
+    missing = required - set(raw.columns)
+    if missing:
+        raise ValueError(
+            "weather_warning_status RAW 컬럼 누락: "
+            + ", ".join(sorted(missing))
+        )
+
+    work = normalize_nulls(raw)
+    work["_tmFc_sort"] = pd.to_numeric(work["tmFc"], errors="coerce")
+    work["_tmSeq_sort"] = pd.to_numeric(work["tmSeq"], errors="coerce")
+    latest = work.sort_values(
+        ["_tmFc_sort", "_tmSeq_sort"],
+        na_position="first",
+    ).iloc[-1]
+    rows = (
+        _parse_active_weather_warning(latest)
+        + _parse_preliminary_weather_warning(latest)
+    )
+    columns = WEATHER_WARNING_STATUS_COLUMNS.copy()
+    if DQ_LINEAGE_COLUMN in raw.columns:
+        columns.append(DQ_LINEAGE_COLUMN)
+    frame = pd.DataFrame(rows, columns=columns)
 
     convert_numeric(
         frame,
@@ -1309,23 +1516,76 @@ def process_bicycle_accident(
 
     frame = normalize_nulls(raw)
 
-    coordinate_renames = {
-        raw_name: standard_name
-        for raw_name, standard_name in (
-            ("lo_crd", "longitude"),
-            ("la_crd", "latitude"),
-        )
-        if (
-            raw_name in frame.columns
-            and standard_name not in frame.columns
-        )
+    rename_map = {
+        "request_year": "search_year",
+        "request_sido": "si_do",
+        "request_gugun": "gu_gun",
+        "request_province_name": "province_name",
+        "request_district_name": "district_name",
+        "lo_crd": "longitude",
+        "la_crd": "latitude",
     }
+    frame.rename(
+        columns={
+            source: target
+            for source, target in rename_map.items()
+            if source in frame.columns and target not in frame.columns
+        },
+        inplace=True,
+    )
 
-    if coordinate_renames:
-        frame.rename(
-            columns=coordinate_renames,
-            inplace=True,
+    required_columns = {
+        "afos_fid",
+        "afos_id",
+        "bjd_cd",
+        "spot_cd",
+        "sido_sgg_nm",
+        "spot_nm",
+        "search_year",
+        "si_do",
+        "gu_gun",
+        "expected_afos_id",
+        "request_page_no",
+        "longitude",
+        "latitude",
+        "geom_json",
+        "collected_at",
+    }
+    missing_columns = required_columns - set(frame.columns)
+    if missing_columns:
+        raise ValueError(
+            "koroad bicycle 필수 컬럼 누락: "
+            + ", ".join(sorted(missing_columns))
         )
+
+    for column in (
+        "afos_fid",
+        "afos_id",
+        "bjd_cd",
+        "spot_cd",
+        "si_do",
+        "gu_gun",
+        "expected_afos_id",
+    ):
+        frame[column] = frame[column].astype("string")
+
+    numeric_columns = (
+        "search_year",
+        "occrrnc_cnt",
+        "caslt_cnt",
+        "dth_dnv_cnt",
+        "se_dnv_cnt",
+        "sl_dnv_cnt",
+        "wnd_dnv_cnt",
+        "request_page_no",
+        "longitude",
+        "latitude",
+    )
+    numeric_before = {
+        column: frame[column].copy()
+        for column in numeric_columns
+        if column in frame.columns
+    }
 
     convert_numeric(
         frame,
@@ -1345,39 +1605,122 @@ def process_bicycle_accident(
         ),
     )
 
-    frame = filter_korea_coordinates(
-        frame,
-        "latitude",
-        "longitude",
-    )
+    invalid_numeric = {
+        column: numeric_before[column][
+            numeric_before[column].notna() & frame[column].isna()
+        ].astype(str).head(5).tolist()
+        for column in numeric_before
+        if (numeric_before[column].notna() & frame[column].isna()).any()
+    }
+    if invalid_numeric:
+        raise ValueError(f"koroad bicycle 숫자 변환 실패: {invalid_numeric}")
 
-    if "coordinate_valid" in frame.columns:
-        frame["coordinate_valid"] = True
+    for column in (
+        "occrrnc_cnt",
+        "caslt_cnt",
+        "dth_dnv_cnt",
+        "se_dnv_cnt",
+        "sl_dnv_cnt",
+        "wnd_dnv_cnt",
+    ):
+        if column in frame.columns and (frame[column].dropna() < 0).any():
+            raise ValueError(f"{column}에 음수가 있습니다.")
 
-    if "collected_at" in frame.columns:
-        audit_before = None
-        if conversion_audit_active() and DQ_LINEAGE_COLUMN in frame.columns:
-            audit_before = frame[[DQ_LINEAGE_COLUMN, "collected_at"]].copy()
-        elif conversion_audit_active():
-            mark_conversion_audit_unavailable(
-                "timestamp conversion ran without _dq_row_id"
-            )
+    coordinate_valid = (
+        frame["longitude"].between(124.0, 132.0, inclusive="both")
+        & frame["latitude"].between(32.0, 39.5, inclusive="both")
+    ).fillna(False)
+    frame = frame.loc[coordinate_valid].copy()
+    frame["coordinate_valid"] = True
 
-        frame["collected_at"] = (
-            safe_timestamp_series(
-                frame["collected_at"]
-            )
+    def normalize_geojson(value):
+        if pd.isna(value):
+            return None, False
+        try:
+            parsed = json.loads(value) if isinstance(value, str) else value
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None, False
+        if not isinstance(parsed, dict):
+            return None, False
+        if parsed.get("type") not in {"Polygon", "MultiPolygon"}:
+            return None, False
+        coordinates = parsed.get("coordinates")
+        if not isinstance(coordinates, list) or not coordinates:
+            return None, False
+        return json.dumps(
+            parsed,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ), True
+
+    normalized_geometries = frame["geom_json"].map(normalize_geojson)
+    frame["geom_json"] = normalized_geometries.map(lambda item: item[0])
+    frame["polygon_valid"] = normalized_geometries.map(
+        lambda item: item[1]
+    ).astype(bool)
+
+    audit_before = None
+    if conversion_audit_active() and DQ_LINEAGE_COLUMN in frame.columns:
+        audit_before = frame[[DQ_LINEAGE_COLUMN, "collected_at"]].copy()
+    frame["collected_at"] = safe_timestamp_series(frame["collected_at"])
+    if audit_before is not None:
+        record_conversion_step(
+            audit_before,
+            frame[[DQ_LINEAGE_COLUMN, "collected_at"]],
+            columns=("collected_at",),
         )
+    if frame["collected_at"].isna().any():
+        raise ValueError("collected_at을 timestamp로 변환할 수 없는 행이 있습니다.")
 
-        if audit_before is not None:
-            record_conversion_step(
-                audit_before,
-                frame[[DQ_LINEAGE_COLUMN, "collected_at"]],
-                columns=("collected_at",),
+    critical_columns = (
+        "afos_fid",
+        "afos_id",
+        "bjd_cd",
+        "spot_cd",
+        "sido_sgg_nm",
+        "spot_nm",
+        "search_year",
+        "si_do",
+        "gu_gun",
+    )
+    critical_nulls = {
+        column: int(frame[column].isna().sum())
+        for column in critical_columns
+        if frame[column].isna().any()
+    }
+    if critical_nulls:
+        raise ValueError(f"필수 컬럼에 NULL이 있습니다: {critical_nulls}")
+
+    mismatch = (frame["afos_id"] != frame["expected_afos_id"]).fillna(True)
+    if mismatch.any():
+        raise ValueError("search_year와 응답 afos_id 관계가 코드표와 다릅니다.")
+
+    duplicate_mask = frame.duplicated("afos_fid", keep=False)
+    if duplicate_mask.any():
+        compare_columns = [
+            "afos_fid", "afos_id", "bjd_cd", "spot_cd", "sido_sgg_nm",
+            "spot_nm", "occrrnc_cnt", "caslt_cnt", "dth_dnv_cnt",
+            "se_dnv_cnt", "sl_dnv_cnt", "wnd_dnv_cnt", "longitude",
+            "latitude", "geom_json",
+        ]
+        conflicting_ids = []
+        for afos_fid, group in frame.loc[duplicate_mask].groupby(
+            "afos_fid",
+            dropna=False,
+        ):
+            if len(
+                group[compare_columns]
+                .astype("string")
+                .fillna("<NULL>")
+                .drop_duplicates()
+            ) > 1:
+                conflicting_ids.append(str(afos_fid))
+        if conflicting_ids:
+            raise ValueError(
+                "같은 afos_fid에 서로 다른 값이 있습니다: "
+                + ", ".join(conflicting_ids[:10])
             )
-
-    # afos_id는 반복 가능하므로 단독 dedupe 금지.
-    # 정확한 ID 규칙이 확정되기 전까지 추가 dedupe하지 않는다.
+        frame = frame.drop_duplicates("afos_fid", keep="first").copy()
 
     add_needs_review(
         frame,
@@ -1390,7 +1733,21 @@ def process_bicycle_accident(
         ),
     )
 
-    return frame.reset_index(drop=True)
+    preferred_columns = [
+        "afos_fid", "afos_id", "search_year", "si_do", "gu_gun",
+        "province_name", "district_name", "bjd_cd", "spot_cd",
+        "sido_sgg_nm", "spot_nm", "occrrnc_cnt", "caslt_cnt",
+        "dth_dnv_cnt", "se_dnv_cnt", "sl_dnv_cnt", "wnd_dnv_cnt",
+        "longitude", "latitude", "coordinate_valid", "geom_json",
+        "polygon_valid", "collected_at", "needs_review",
+    ]
+    existing_preferred = [
+        column for column in preferred_columns if column in frame.columns
+    ]
+    remaining = [
+        column for column in frame.columns if column not in existing_preferred
+    ]
+    return frame.reindex(columns=existing_preferred + remaining).reset_index(drop=True)
 
 
 # ============================================================
@@ -1912,6 +2269,8 @@ PROCESSORS: dict[
 def process_dataset(
     table: str,
     raw: pd.DataFrame,
+    *,
+    allow_empty: bool = False,
 ) -> pd.DataFrame:
     """
     등록된 테이블의 Silver processor를 실행한다.
@@ -1973,30 +2332,6 @@ def process_dataset(
             "정제 규칙을 정의한 뒤 PROCESSORS에 등록하세요."
         )
 
-    # --------------------------------------------------------
-    # RAW 품질 통계
-    # --------------------------------------------------------
-
-    raw_columns = len(
-        [column for column in raw.columns if column != DQ_LINEAGE_COLUMN]
-    )
-
-    raw_cells = (
-        raw_rows
-        * raw_columns
-    )
-
-    raw_null_count = count_effective_nulls(
-        raw
-    )
-
-    raw_null_rate = (
-        raw_null_count
-        / raw_cells
-        * 100
-        if raw_cells
-        else 0.0
-    )
 
     # --------------------------------------------------------
     # 등록 데이터셋 정제
@@ -2037,7 +2372,7 @@ def process_dataset(
     # 정제 결과 검증
     # --------------------------------------------------------
 
-    if processed.empty:
+    if processed.empty and not allow_empty:
 
         elapsed = (
             time.perf_counter()
@@ -2066,13 +2401,16 @@ def process_dataset(
     # 완전 결측 컬럼 제거
     # --------------------------------------------------------
 
-    (
-        processed,
-        empty_column_stats,
-    ) = drop_fully_empty_columns(
-        raw,
-        processed,
-    )
+    if processed.empty:
+        empty_column_stats = []
+    else:
+        (
+            processed,
+            empty_column_stats,
+        ) = drop_fully_empty_columns(
+            raw,
+            processed,
+        )
 
     # 컬럼 제거 후에도 유효한 데이터 구조인지 확인
     if len(processed.columns) == 0:
@@ -2101,169 +2439,6 @@ def process_dataset(
             "기존 processed를 유지합니다."
         )
 
-    # --------------------------------------------------------
-    # 행 품질 통계
-    # --------------------------------------------------------
-
-    processed_rows = len(processed)
-
-    removed_rows = (
-        raw_rows
-        - processed_rows
-    )
-
-    removal_rate = (
-        removed_rows
-        / raw_rows
-        * 100
-        if raw_rows
-        else 0.0
-    )
-
-    retention_rate = (
-        processed_rows
-        / raw_rows
-        * 100
-        if raw_rows
-        else 0.0
-    )
-
-    # --------------------------------------------------------
-    # PROCESSED 결측 통계
-    # --------------------------------------------------------
-
-    processed_columns = len(
-        [column for column in processed.columns if column != DQ_LINEAGE_COLUMN]
-    )
-
-    processed_cells = (
-        processed_rows
-        * processed_columns
-    )
-
-    processed_null_count = int(
-        processed
-        .isna()
-        .sum()
-        .sum()
-    )
-
-    processed_null_rate = (
-        processed_null_count
-        / processed_cells
-        * 100
-        if processed_cells
-        else 0.0
-    )
-
-    # --------------------------------------------------------
-    # NEEDS_REVIEW 통계
-    # --------------------------------------------------------
-
-    review_count = (
-        int(
-            processed["needs_review"]
-            .fillna(False)
-            .sum()
-        )
-        if "needs_review" in processed.columns
-        else 0
-    )
-
-    review_rate = (
-        review_count
-        / processed_rows
-        * 100
-        if processed_rows
-        else 0.0
-    )
-
-    # --------------------------------------------------------
-    # 정제시간
-    # --------------------------------------------------------
-
-    elapsed = (
-        time.perf_counter()
-        - start_time
-    )
-
-    # --------------------------------------------------------
-    # 실행 결과
-    # --------------------------------------------------------
-
-    print()
-    print("=" * 70)
-    print(f"[DATA QUALITY] {table}")
-    print("-" * 70)
-
-    print("[ROWS]")
-    print(
-        f"RAW                  : "
-        f"{raw_rows:,}건"
-    )
-    print(
-        f"PROCESSED            : "
-        f"{processed_rows:,}건"
-    )
-    print(
-        f"REMOVED              : "
-        f"{removed_rows:,}건 "
-        f"({removal_rate:.2f}%)"
-    )
-    print(
-        f"RETENTION            : "
-        f"{retention_rate:.2f}%"
-    )
-
-    print()
-    print("[MISSING]")
-
-    print(
-        f"RAW NULL             : "
-        f"{raw_null_count:,}개 "
-        f"({raw_null_rate:.2f}%)"
-    )
-
-    print(
-        f"PROCESSED NULL       : "
-        f"{processed_null_count:,}개 "
-        f"({processed_null_rate:.2f}%)"
-    )
-
-    print(
-        f"EMPTY COLUMN DROPPED : "
-        f"{len(empty_column_stats):,}개"
-    )
-
-    for stat in empty_column_stats:
-        print(
-            f"  - {stat['column']} : "
-            f"{stat['null_count']:,}/"
-            f"{stat['row_count']:,} "
-            f"missing "
-            f"({stat['null_rate']:.2f}%)"
-        )
-
-    if "needs_review" in processed.columns:
-
-        print()
-        print("[QUALITY]")
-
-        print(
-            f"NEEDS_REVIEW         : "
-            f"{review_count:,}건 "
-            f"({review_rate:.2f}%)"
-        )
-
-    print()
-    print("[PERFORMANCE]")
-
-    print(
-        f"TRANSFORM            : "
-        f"{format_elapsed(elapsed)}"
-    )
-
-    print("=" * 70)
 
     return processed.reset_index(
         drop=True

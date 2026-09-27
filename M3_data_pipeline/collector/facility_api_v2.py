@@ -1,5 +1,6 @@
 import os
 import math
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -8,6 +9,12 @@ from urllib.parse import unquote
 import requests
 import pandas as pd
 from dotenv import load_dotenv
+
+PIPELINE_DIR = Path(__file__).resolve().parents[1]
+if str(PIPELINE_DIR) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_DIR))
+
+from pipeline_elt import replace_raw_dataset_group
 
 
 # --------------------------------------------------
@@ -52,17 +59,6 @@ REQUEST_DELAY = 0.1
 
 
 # --------------------------------------------------
-# 2. 저장 경로
-# --------------------------------------------------
-
-OUTPUT_DIR = ROOT_DIR / "data" / "raw" / "facility"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-snapshot_date = datetime.now().strftime("%Y%m%d")
-
-OUTPUT_PATH = OUTPUT_DIR / f"facility_all_{snapshot_date}.csv"
-
-
 # --------------------------------------------------
 # 3. 시간 표시 함수
 # --------------------------------------------------
@@ -302,7 +298,7 @@ def main():
 
         raise RuntimeError(
             "수집 실패 페이지가 존재합니다. "
-            "불완전한 RAW CSV는 저장하지 않습니다."
+            "불완전한 RAW DB snapshot은 저장하지 않습니다."
         )
 
     # totalCount와 실제 건수 비교
@@ -312,7 +308,7 @@ def main():
             f"건수 불일치: "
             f"API={total_count:,} / "
             f"수집={len(all_items):,}. "
-            f"RAW CSV는 저장하지 않습니다."
+            f"RAW DB snapshot은 저장하지 않습니다."
         )
 
     print("건수 검증: 정상")
@@ -339,19 +335,14 @@ def main():
 
 
     # --------------------------------------------------
-    # 8. RAW CSV 저장
+    # 8. RAW DB 저장
     # --------------------------------------------------
 
     print()
-    print("CSV 저장 중...")
-
-    temporary_path = OUTPUT_PATH.with_suffix(".tmp.csv")
-    df.to_csv(
-        temporary_path,
-        index=False,
-        encoding="utf-8-sig",
+    print("RAW DB 저장 중...")
+    replace_raw_dataset_group(
+        {"facility": df}
     )
-    temporary_path.replace(OUTPUT_PATH)
 
 
     # --------------------------------------------------
@@ -369,10 +360,7 @@ def main():
         "최종 수집 건수:",
         f"{len(df):,}"
     )
-    print(
-        "CSV:",
-        OUTPUT_PATH
-    )
+    print("RAW DB: raw.facility")
     print(
         "전체 소요시간:",
         format_time(total_elapsed)

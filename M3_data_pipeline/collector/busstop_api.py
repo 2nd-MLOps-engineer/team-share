@@ -1,11 +1,20 @@
 import os
-import csv
+import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import unquote
 
 import requests
+import pandas as pd
 from dotenv import load_dotenv
+
+PIPELINE_DIR = Path(__file__).resolve().parents[1]
+if str(PIPELINE_DIR) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_DIR))
+
+from pipeline_elt import replace_raw_dataset_group
 
 
 # ============================================================
@@ -17,7 +26,7 @@ from dotenv import load_dotenv
 # 2. 도시코드별 정류장 전체 조회
 # 3. 페이지네이션
 # 4. 중복 제거
-# 5. 전국 버스정류장 CSV 저장
+# 5. 전국 버스정류장 RAW DB 저장
 #
 # DB / PostGIS / APScheduler 사용 안 함
 # ============================================================
@@ -29,13 +38,6 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = PROJECT_ROOT / "data" / "raw" / "bus_stop"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-OUTPUT_FILE = DATA_DIR / "tago_bus_stops_all.csv"
-
 
 # ============================================================
 # ENV
@@ -82,12 +84,27 @@ REQUEST_DELAY = 0.2
 
 RETRY_COUNT = 3
 
+MAX_WORKERS = 8
+
 
 # ============================================================
-# HTTP SESSION
+# THREAD-LOCAL HTTP SESSION
 # ============================================================
 
-session = requests.Session()
+thread_local = threading.local()
+
+
+def get_session():
+
+    if not hasattr(
+        thread_local,
+        "session"
+    ):
+
+        thread_local.session = requests.Session()
+
+
+    return thread_local.session
 
 
 # ============================================================
@@ -103,7 +120,7 @@ def request_json(url, params):
 
         try:
 
-            response = session.get(
+            response = get_session().get(
                 url,
                 params=params,
                 timeout=30
@@ -528,52 +545,27 @@ def remove_duplicates(
 
 
 # ============================================================
-# CSV 저장
+# RAW DB 저장
 # ============================================================
 
-def save_csv(
+def save_raw(
     stations
 ):
-
-    fieldnames = [
-
-        "city_code",
-
-        "city_name",
-
-        "node_id",
-
-        "node_name",
-
-        "node_no",
-
-        "latitude",
-
-        "longitude"
-    ]
-
-
-    temporary_file = OUTPUT_FILE.with_suffix(".tmp.csv")
-
-    with open(
-        temporary_file,
-        "w",
-        newline="",
-        encoding="utf-8-sig"
-    ) as f:
-
-        writer = csv.DictWriter(
-            f,
-            fieldnames=fieldnames
-        )
-
-        writer.writeheader()
-
-        writer.writerows(
-            stations
-        )
-
-    temporary_file.replace(OUTPUT_FILE)
+    frame = pd.DataFrame(
+        stations,
+        columns=[
+            "city_code",
+            "city_name",
+            "node_id",
+            "node_name",
+            "node_no",
+            "latitude",
+            "longitude",
+        ],
+    )
+    replace_raw_dataset_group(
+        {"bus_stop": frame}
+    )
 
 
 # ============================================================
@@ -581,6 +573,8 @@ def save_csv(
 # ============================================================
 
 def main():
+
+    collection_started = time.perf_counter()
 
     print("=" * 60)
 
@@ -625,75 +619,122 @@ def main():
 
     all_stations = []
 
+    successful_cities = []
+
+    failed_cities = []
 
     # ========================================================
     # 2. 도시별 정류장 수집
     # ========================================================
 
-    for index, city in enumerate(
-        cities,
-        start=1
-    ):
-
-        city_code = city.get(
-            "citycode"
-        )
-
-        city_name = city.get(
-            "cityname"
-        )
+    future_cities = {}
 
 
-        if not city_code:
+    with ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
 
-            continue
+        for index, city in enumerate(
+            cities,
+            start=1
+        ):
+
+            city_code = city.get(
+                "citycode"
+            )
+
+            city_name = city.get(
+                "cityname"
+            )
 
 
-        print()
+            if not city_code:
 
-        print(
-            f"[{index}/{len(cities)}] "
-            f"{city_name} "
-            f"(cityCode={city_code})"
-        )
+                failed_cities.append({
+                    "city_code": city_code,
+                    "city_name": city_name,
+                    "error": "city_code 누락"
+                })
+
+                continue
 
 
-        city_stations = (
-            get_city_stations(
+            print()
+
+            print(
+                f"[{index}/{len(cities)}] "
+                f"{city_name} "
+                f"(cityCode={city_code}) 작업 제출"
+            )
+
+
+            future = executor.submit(
+                get_city_stations,
                 city_code,
                 city_name
             )
-        )
 
 
-        all_stations.extend(
-            city_stations
-        )
+            future_cities[future] = (
+                city_code,
+                city_name
+            )
 
 
-        print(
-            f"→ {city_name}: "
-            f"{len(city_stations)}개"
-        )
+        for future in as_completed(
+            future_cities
+        ):
+
+            (
+                city_code,
+                city_name
+            ) = future_cities[future]
 
 
-        print(
-            f"→ 전국 누적: "
-            f"{len(all_stations)}개"
-        )
+            try:
+
+                city_stations = future.result()
+
+            except Exception as error:
+
+                failed_cities.append({
+                    "city_code": city_code,
+                    "city_name": city_name,
+                    "error": str(error)
+                })
+
+                print(
+                    f"→ {city_name}: 실패 - "
+                    f"{error}"
+                )
+
+            else:
+
+                successful_cities.append({
+                    "city_code": city_code,
+                    "city_name": city_name
+                })
+
+                all_stations.extend(
+                    city_stations
+                )
 
 
-        time.sleep(
-            REQUEST_DELAY
-        )
+                print(
+                    f"→ {city_name}: "
+                    f"{len(city_stations)}개"
+                )
+
+
+                print(
+                    f"→ 전국 누적: "
+                    f"{len(all_stations)}개"
+                )
 
 
     # ========================================================
     # 3. 중복 제거
     # ========================================================
-
-    if not all_stations:
-        raise RuntimeError("전국 버스정류장 데이터가 0건입니다. 기존 파일을 유지합니다.")
 
     before_count = len(
         all_stations
@@ -712,12 +753,103 @@ def main():
     )
 
 
+    all_stations.sort(
+        key=lambda station: (
+            str(station.get("city_code") or ""),
+            str(station.get("node_id") or "")
+        )
+    )
+
+
+    failed_cities.sort(
+        key=lambda city: (
+            str(city.get("city_code") or ""),
+            str(city.get("city_name") or "")
+        )
+    )
+
+
+    if failed_cities:
+
+        collection_elapsed = (
+            time.perf_counter()
+            - collection_started
+        )
+
+        print()
+        print("=" * 60)
+        print("TAGO 전국 버스정류장 수집 실패")
+        print("=" * 60)
+        print("MAX_WORKERS:", MAX_WORKERS)
+        print("전체 도시 수:", len(cities))
+        print("성공 도시 수:", len(successful_cities))
+        print("실패 도시 수:", len(failed_cities))
+        print("실패 도시 목록:")
+
+        for failure in failed_cities:
+
+            print(
+                "  -",
+                failure["city_code"],
+                failure["city_name"],
+                failure["error"]
+            )
+
+        print("전체 수집 건수:", before_count)
+        print("중복 제거 건수:", before_count - after_count)
+        print("최종 건수:", after_count)
+        print(
+            "전체 wall-clock:",
+            f"{collection_elapsed:.2f}초 / "
+            f"{collection_elapsed / 60:.2f}분"
+        )
+
+        raise RuntimeError(
+            f"{len(failed_cities)}개 도시 수집 실패. "
+            "기존 RAW DB snapshot을 유지합니다."
+        )
+
+
+    if not all_stations:
+
+        collection_elapsed = (
+            time.perf_counter()
+            - collection_started
+        )
+
+        print()
+        print("=" * 60)
+        print("TAGO 전국 버스정류장 수집 실패")
+        print("=" * 60)
+        print("MAX_WORKERS:", MAX_WORKERS)
+        print("전체 도시 수:", len(cities))
+        print("성공 도시 수:", len(successful_cities))
+        print("실패 도시 수:", len(failed_cities))
+        print("실패 도시 목록:", failed_cities)
+        print("전체 수집 건수:", before_count)
+        print("중복 제거 건수:", before_count - after_count)
+        print("최종 건수:", after_count)
+        print(
+            "전체 wall-clock:",
+            f"{collection_elapsed:.2f}초 / "
+            f"{collection_elapsed / 60:.2f}분"
+        )
+
+        raise RuntimeError("전국 버스정류장 데이터가 0건입니다. 기존 파일을 유지합니다.")
+
+
     # ========================================================
-    # 4. CSV 저장
+    # 4. RAW DB 저장
     # ========================================================
 
-    save_csv(
+    save_raw(
         all_stations
+    )
+
+
+    collection_elapsed = (
+        time.perf_counter()
+        - collection_started
     )
 
 
@@ -737,24 +869,52 @@ def main():
 
 
     print(
-        "수집 건수:",
+        "MAX_WORKERS:",
+        MAX_WORKERS
+    )
+
+    print(
+        "전체 도시 수:",
+        len(cities)
+    )
+
+    print(
+        "성공 도시 수:",
+        len(successful_cities)
+    )
+
+    print(
+        "실패 도시 수:",
+        len(failed_cities)
+    )
+
+    print(
+        "실패 도시 목록:",
+        failed_cities
+    )
+
+    print(
+        "전체 수집 건수:",
         before_count
     )
 
     print(
-        "중복 제거:",
+        "중복 제거 건수:",
         before_count - after_count
     )
 
     print(
-        "최종 정류장:",
+        "최종 건수:",
         after_count
     )
 
     print(
-        "CSV:",
-        OUTPUT_FILE
+        "전체 wall-clock:",
+        f"{collection_elapsed:.2f}초 / "
+        f"{collection_elapsed / 60:.2f}분"
     )
+
+    print("RAW DB: raw.bus_stop")
 
 
 # ============================================================

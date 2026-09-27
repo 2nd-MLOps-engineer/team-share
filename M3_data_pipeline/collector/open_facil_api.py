@@ -1,12 +1,19 @@
 from pathlib import Path
 import os
 import math
+import sys
 import time
 import requests
 import pandas as pd
 
 from urllib.parse import unquote
 from dotenv import load_dotenv
+
+PIPELINE_DIR = Path(__file__).resolve().parents[1]
+if str(PIPELINE_DIR) not in sys.path:
+    sys.path.insert(0, str(PIPELINE_DIR))
+
+from pipeline_elt import replace_raw_dataset_group
 
 
 # ==================================================
@@ -30,25 +37,6 @@ SERVICE_KEY = unquote(RAW_KEY)
 URL = "https://api.data.go.kr/openapi/tn_pubr_public_pblfclt_opn_info_api"
 
 NUM_OF_ROWS = 1000
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-OUTPUT_DIR = (
-    PROJECT_ROOT
-    / "data"
-    / "raw"
-    / "public_open_facility"
-)
-
-OUTPUT_PATH = (
-    OUTPUT_DIR
-    / "public_open_facility_all.csv"
-)
-
-OUTPUT_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
 
 all_items = []
 start_time = time.perf_counter()
@@ -175,20 +163,16 @@ print("컬럼 수:", len(df.columns))
 
 
 # ==================================================
-# 7. RAW CSV 저장
+# 7. RAW DB 저장
 # ==================================================
-temporary_path = OUTPUT_PATH.with_suffix(".tmp.csv")
-df.to_csv(
-    temporary_path,
-    index=False,
-    encoding="utf-8-sig"
+replace_raw_dataset_group(
+    {"public_open_facility": df}
 )
-temporary_path.replace(OUTPUT_PATH)
 
 elapsed = time.perf_counter() - start_time
 
 print()
 print("수집 완료")
-print("CSV:", OUTPUT_PATH)
+print("RAW DB: raw.public_open_facility")
 print("건수:", f"{len(df):,}")
 print("소요시간:", format_time(elapsed))
