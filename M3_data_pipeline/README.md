@@ -20,11 +20,11 @@ PostgreSQL raw (Bronze)               │
       │                               │
       │                        문화빅데이터 웹
       │                               │
-      │                           Selenium
+      │                        Selenium 수집
       │                               │
-      │                         Source CSV
+      │                           원본 CSV
       │                               │
-      │                      Validation / COPY
+      │                      PostgreSQL COPY 적재
       │                               │
       ◀───────────────────────────────┘
       │
@@ -433,13 +433,9 @@ git diff --check
 
 향후 개선 항목:
 
-- Column Profile 및 NULL 변화에 대한 데이터셋별 threshold 정책
-- 중앙화된 로그 수집 및 모니터링
-- 운영 환경에서의 전체 E2E 회귀 테스트
-- `derived` 계층을 활용한 feature engineering
-- 데이터셋별 SLA / freshness 관리
-- 운영 환경의 secret 및 configuration 관리 강화
-
+- 데이터셋별 기준을 적용한 데이터 품질 이상 자동 판정
+- 신규 데이터 수집기 추가 시 스케줄링·정제·품질검사 자동 연결
+- `derived` 계층을 활용한 추천용 파생 데이터 및 Feature 생성
 ---
 
 ## Data Flow
