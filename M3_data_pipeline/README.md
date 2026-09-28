@@ -16,7 +16,7 @@
       │                               │
       │ direct load                   │
       ▼                               │
-PostgreSQL raw (Bronze)               │
+PostgreSQL raw                        │
       │                               │
       │                        문화빅데이터 웹
       │                               │
@@ -35,9 +35,9 @@ dataset_processors.py
 Data Quality Validation
       │
       ▼
-PostgreSQL processed (Silver)
+PostgreSQL processed
       │
-      ├──────────→ Backend / Service
+      ├──────────→ Backend
       │
       ▼
 derived
@@ -50,7 +50,7 @@ Pipeline execution
       └──────────→ Discord Alert / Operations Summary
 ```
 
-### `raw` — Bronze
+### `raw`
 
 수집한 원천 데이터를 보존하는 계층입니다.
 
@@ -58,7 +58,7 @@ Pipeline execution
 
 일반 API 데이터는 수집 후 불필요한 중간 CSV를 생성하지 않고 `raw`에 직접 적재합니다.
 
-### `processed` — Silver
+### `processed`
 
 `raw` 데이터를 기반으로 데이터셋별 정제·표준화 규칙을 적용한 결과를 저장합니다.
 
