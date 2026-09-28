@@ -60,7 +60,7 @@ Pipeline execution
 
 ### `processed`
 
-`raw` 데이터를 기반으로 데이터셋별 정제·표준화 규칙을 적용한 결과를 저장합니다.
+`raw` 데이터를 기반으로 데이터셋별 정제·변환 규칙을 적용한 결과를 저장합니다.
 
 주요 처리 항목은 다음과 같습니다.
 
@@ -97,7 +97,7 @@ Pipeline execution
 따라서 원천 데이터는 `raw`에 보존하고, 정제 결과는 `processed`에 별도로 적재하도록 구성했습니다.
 
 ```text
-Source → RAW → Cleaning / Validation → PROCESSED
+Source → RAW → Cleaning / Transformation → Data Quality Audit → PROCESSED
 ```
 
 이를 통해 원본과 최종 결과를 비교하고 동일한 RAW 데이터에서 정제 로직을 다시 실행할 수 있습니다.
@@ -115,7 +115,7 @@ API → CSV → pandas → DB
 운영 대상 API 수집기는 다음 흐름을 사용하도록 정리했습니다.
 
 ```text
-API → Collector → PostgreSQL RAW → Processing → PROCESSED
+API → Collector → PostgreSQL RAW → Processing → DQ → PROCESSED
 ```
 
 CSV는 더 이상 일반 API 데이터의 적재 중간 단계로 사용하지 않습니다.
@@ -186,7 +186,7 @@ RAW에서 PROCESSED로 이동하는 동안 행에 추적 ID를 부여하여 다�
 - 알 수 없는 tracking ID
 - tracking ID 중복
 
-최종 행 수가 정제 규칙으로 설명되지 않으면 DQ 실패로 판정할 수 있도록 구성했습니다.
+Row Tracking과 Row Count Reconciliation 조건을 충족하지 않으면 `CHECK_FAILED`로 판정합니다.
 
 ### NULL Transition
 
@@ -360,7 +360,7 @@ Raw log와 구조화된 실행 이력을 분리하여 운영 로그 전체를 DB
 | 버스정류장 | 매월 28일 03:00 |
 | 두루누비 | 매주 월요일 04:00 |
 | 체육시설 | 매월 1일 04:00 |
-| 공공개방시설 | 매월 1일 05:00 |
+| 공공시설개방 | 매월 1일 05:00 |
 | AED | 매월 2일 03:00 |
 | 자전거 사고다발지역 | 매월 3일 02:00 |
 | 문화빅데이터 | 매월 1일 07:00 |
@@ -375,7 +375,7 @@ Raw log와 구조화된 실행 이력을 분리하여 운영 로그 전체를 DB
 - 버스정류장
 - AED (자동심장충격기 설치정보)
 - 공공체육시설
-- 공공개방시설
+- 공공시설개방
 - 두루누비 산책·둘레길
 - 자전거 사고다발지역
 - 문화빅데이터 기반 체육시설·프로그램·교통·안전·체력측정 데이터
@@ -399,31 +399,6 @@ M3_data_pipeline/
 ├── tests/
 └── requirements.txt
 ```
-
----
-
-## Verification
-
-리팩터링 후 독립된 Python 3.13 가상환경에서 전체 단위 테스트를 실행했습니다.
-
-```text
-78 passed
-15 subtests passed
-0 failed
-```
-
-추가 정적 검증:
-
-```text
-python -m compileall -q .
-git diff --check
-```
-
-모두 오류 없이 통과했습니다.
-
-실제 데이터 수집 과정에서는 자전거 사고다발지역 수집의 checkpoint/resume, API quota 처리와 버스정류장 전국 수집 및 RAW/PROCESSED 행 수 검증 등 주요 실행 경로를 확인했습니다.
-
-> 최근 구조 변경 이후 모든 외부 API 및 DB 경로를 대상으로 전체 E2E를 다시 실행한 것은 아니므로, 단위 테스트 검증과 실제 운영 데이터 검증 범위를 구분하여 기록합니다.
 
 ---
 
