@@ -185,7 +185,12 @@ class HumanAuditReportTest(unittest.TestCase):
         self.assertNotIn(DQ_LINEAGE_COLUMN, result.column_profiles)
         self.assertNotIn(DQ_LINEAGE_COLUMN, processed.columns)
 
-    def test_report_has_requested_sections_and_na_for_unconfigured_rules(self):
+        report = render_dq_audit_report(result)
+        self.assertNotIn("Source anomalies", report)
+        self.assertNotIn("무한값 (number)", report)
+        self.assertIn("column_profiles", result.as_dict())
+
+    def test_report_is_concise_while_machine_payload_keeps_detail(self):
         _processed, result = profile_processor_run(
             "report",
             pd.DataFrame({"value": ["1", "2"]}),
@@ -196,15 +201,53 @@ class HumanAuditReportTest(unittest.TestCase):
         report = render_dq_audit_report(result)
         payload = result.as_dict()
 
-        self.assertIn("1. Validation Summary", report)
+        self.assertIn("1. Validation", report)
         self.assertIn("2. Row Transformation", report)
-        self.assertIn("3. Missing Value Profile", report)
-        self.assertIn("4. Column Profile RAW <-> PROCESSED", report)
-        self.assertIn("5. Duplicate / Needs Review / Issues", report)
-        self.assertIn("N/A", report)
+        self.assertIn("3. Data Quality Findings", report)
+        self.assertIn("4. Result", report)
+        self.assertNotIn("Missing Value Profile", report)
+        self.assertNotIn("Column Profile RAW <-> PROCESSED", report)
+        self.assertNotIn("source normalization conversion removed final", report)
+        self.assertNotIn("EXPECTED", report)
+        self.assertNotIn("no configured threshold", report)
+        self.assertNotIn("N/A", report)
+        self.assertIn("Row lineage", report)
+        self.assertIn("Row reconciliation", report)
         self.assertEqual(payload["status"], "CHECK_PASSED")
         self.assertIn("row_tracking", payload)
         self.assertIn("column_profiles", payload)
+        self.assertIn("removed_row_null_by_column", payload["nulls"])
+
+    def test_report_shows_removal_reasons_and_only_new_null_columns(self):
+        raw = pd.DataFrame(
+            {
+                "faci_cd": ["OPEN", "CLOSED"],
+                "faci_stat_nm": ["정상운영", "폐업"],
+                "faci_lat": ["37.5", "37.4"],
+                "faci_lot": ["127.0", "127.1"],
+                "base_ymd": ["invalid", "20210101"],
+            }
+        )
+
+        _processed, result = process_with_dq_profile("facility", raw)
+        report = render_dq_audit_report(result)
+
+        self.assertIn("RAW", report)
+        self.assertIn("REMOVED", report)
+        self.assertIn("PROCESSED", report)
+        self.assertIn("EXPLAINED", report)
+        self.assertIn("UNEXPLAINED", report)
+        self.assertIn("비정상 운영 상태", report)
+        self.assertNotIn("facility_status_not_normal_operation", report)
+        self.assertIn("Normalization NULL", report)
+        self.assertIn("Conversion NULL (base_ymd)", report)
+        self.assertIn("Review required", report)
+        self.assertIn("Issues", report)
+        self.assertIn("없음", report)
+        self.assertIn("1건이 정제 규칙에 따라 제거되었으며", report)
+        self.assertIn("설명되지 않은 데이터 손실은 0건입니다.", report)
+        self.assertNotIn("source=", report)
+        self.assertNotIn("final=", report)
 
     def test_missing_value_profile_includes_removed_row_nulls_by_column(self):
         def remove_null_row(frame):
@@ -222,6 +265,88 @@ class HumanAuditReportTest(unittest.TestCase):
 
 
 class PipelineDQIntegrationTest(unittest.TestCase):
+    def test_facility_preserves_lineage_across_expected_row_filters(self):
+        raw = pd.DataFrame(
+            {
+                "faci_cd": ["OPEN", "CLOSED", "INVALID_COORDINATES"],
+                "faci_stat_nm": ["정상운영", "폐업", "정상운영"],
+                "faci_lat": ["37.5", "37.4", "999"],
+                "faci_lot": ["127.0", "127.1", "127.0"],
+            }
+        )
+
+        processed, result = process_with_dq_profile("facility", raw)
+
+        self.assertEqual(processed["faci_cd"].tolist(), ["OPEN"])
+        self.assertNotIn(DQ_LINEAGE_COLUMN, processed.columns)
+        self.assertEqual(result.status, DQAuditStatus.CHECK_PASSED)
+        self.assertTrue(result.row_tracking.passed)
+        self.assertEqual(result.row_tracking.missing_ids, 2)
+        self.assertEqual(result.rows.removed_rows, 2)
+        self.assertEqual(result.rows.explained_removed_rows, 2)
+        self.assertEqual(result.rows.unexplained_row_loss, 0)
+        self.assertEqual(
+            result.rows.removal_reasons,
+            {
+                "facility_invalid_or_missing_korea_coordinates": 1,
+                "facility_status_not_normal_operation": 1,
+            },
+        )
+        self.assertTrue(result.rows.row_count_matches)
+
+    def test_weather_warning_explains_processor_key_deduplication(self):
+        raw = pd.DataFrame(
+            {
+                "stnId": ["108", "108", "159"],
+                "tmFc": ["202609162200", "202609162200", "202609161800"],
+                "tmSeq": ["82", "82", "31"],
+                "title": ["older payload", "newer payload", "other warning"],
+                "collected_at": [
+                    "2026-09-22 06:52:53",
+                    "2026-09-28 11:00:00",
+                    "2026-09-22 06:52:53",
+                ],
+            }
+        )
+
+        processed, result = process_with_dq_profile("weather_warning", raw)
+
+        self.assertEqual(len(processed), 2)
+        self.assertEqual(result.rows.removed_rows, 1)
+        self.assertEqual(result.rows.explained_removed_rows, 1)
+        self.assertEqual(result.rows.unexplained_row_loss, 0)
+        self.assertEqual(
+            result.rows.removal_reasons,
+            {"weather_warning_duplicate_stn_tmfc_tmseq": 1},
+        )
+
+    def test_weather_warning_status_explains_no_warning_snapshot(self):
+        raw = pd.DataFrame(
+            {
+                "t6": ["o 없 음"],
+                "t7": ["o 없음"],
+                "tmEf": ["202609261200"],
+                "tmFc": ["202609261200"],
+                "tmSeq": ["130"],
+                "collected_at": ["2026-09-27 20:17:46"],
+            }
+        )
+
+        processed, result = process_with_dq_profile(
+            "weather_warning_status",
+            raw,
+            allow_empty=True,
+        )
+
+        self.assertTrue(processed.empty)
+        self.assertEqual(result.rows.removed_rows, 1)
+        self.assertEqual(result.rows.explained_removed_rows, 1)
+        self.assertEqual(result.rows.unexplained_row_loss, 0)
+        self.assertEqual(
+            result.rows.removal_reasons,
+            {"weather_warning_status_no_active_or_preliminary_warning": 1},
+        )
+
     def test_air_quality_sort_has_zero_false_conversion_loss_and_same_output(self):
         raw = pd.DataFrame(
             {

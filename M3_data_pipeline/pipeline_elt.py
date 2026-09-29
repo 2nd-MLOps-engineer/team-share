@@ -12,7 +12,7 @@ PROCESSED(Silver) 데이터를 생성한다.
    - dataset_processors.py의 데이터셋별 정제 함수를 실행한다.
    - PROCESSED 데이터를 staging 테이블에 먼저 저장한다.
    - staging 테이블의 행 수를 검증한다.
-   - 검증에 성공하면 기존 PROCESSED 테이블만 새 데이터로 교체한다.
+   - 검증에 성공하면 metadata 정책에 따라 PROCESSED를 교체하거나 시계열 upsert한다.
    - 기존 RAW 테이블은 수정하지 않는다.
 
 각 처리 과정에서 RAW/PROCESSED 건수, NULL 수,
@@ -40,21 +40,21 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, URL
 
 if __package__:
-    from .dataset_processors import normalize_nulls, process_dataset
+    from .dataset_processors import add_air_quality_observation_key, normalize_nulls, process_dataset
     from .dq_profiler import (
         DQProfileResult,
         profile_processor_run,
         render_dq_audit_report,
     )
-    from .pipeline_metadata import DatasetSpec, SourceKind, TableSpec
+    from .pipeline_metadata import DatasetSpec, LoadPolicy, SourceKind, TableSpec, get_dataset_specs
 else:
-    from dataset_processors import normalize_nulls, process_dataset
+    from dataset_processors import add_air_quality_observation_key, normalize_nulls, process_dataset
     from dq_profiler import (
         DQProfileResult,
         profile_processor_run,
         render_dq_audit_report,
     )
-    from pipeline_metadata import DatasetSpec, SourceKind, TableSpec
+    from pipeline_metadata import DatasetSpec, LoadPolicy, SourceKind, TableSpec, get_dataset_specs
 
 
 LOGGER = logging.getLogger(__name__)
@@ -396,6 +396,190 @@ def replace_raw_dataset_group(
             db_engine.dispose()
 
 
+def _prepare_timeseries_frame(frame: pd.DataFrame, spec: TableSpec) -> pd.DataFrame:
+    """Reject ambiguous observation identities; a batch's last occurrence wins."""
+    if spec.load_policy is not LoadPolicy.TIMESERIES:
+        raise ValueError(f"{spec.table}: not a timeseries table")
+    if spec.table == "air_quality":
+        frame = add_air_quality_observation_key(frame)
+    _validate_identifier(spec.table)
+    for column in frame.columns:
+        _validate_column_identifier(column)
+    for column in spec.upsert_key:
+        _validate_column_identifier(column)
+    missing = set(spec.upsert_key) - set(frame.columns)
+    if missing:
+        raise ValueError(f"{spec.table}: missing observation keys: {sorted(missing)}")
+    if frame.empty:
+        raise ValueError(f"{spec.table}: empty timeseries batch")
+    result = frame.copy()
+    # Only identity fields are normalized here; payload NULL transitions remain
+    # the processor/DQ profiler's responsibility.
+    keys = normalize_nulls(result[list(spec.upsert_key)])
+    if keys.isna().any().any():
+        raise ValueError(f"{spec.table}: NULL observation key")
+    result[list(spec.upsert_key)] = keys
+    return result.drop_duplicates(subset=list(spec.upsert_key), keep="last")
+
+
+def _backfill_air_quality_observation_keys(connection, schema: str) -> None:
+    """Upgrade a legacy snapshot in the enclosing locked transaction.
+
+    ctid is used only within this transaction to address each existing row;
+    it is never an observation key. Invalid legacy rows abort the whole load.
+    """
+    target = f'"{_validate_identifier(schema)}"."air_quality"'
+    rows = connection.execute(text(
+        f'SELECT ctid::text AS "_migration_row_id", * FROM {target} '
+        'WHERE "observation_time_key" IS NULL'
+    )).mappings().all()
+    if rows:
+        keyed = add_air_quality_observation_key(pd.DataFrame(rows))
+        connection.execute(text(
+            f'UPDATE {target} SET "observation_time_key" = :key '
+            'WHERE ctid = CAST(:row_id AS tid)'
+        ), [
+            {"row_id": row_id, "key": key}
+            for row_id, key in keyed[["_migration_row_id", "observation_time_key"]].itertuples(index=False, name=None)
+        ])
+
+
+def _upsert_timeseries_group(
+    engine: Engine,
+    frames: Mapping[str, pd.DataFrame],
+    specs: Mapping[str, TableSpec],
+    *,
+    schema: str,
+) -> None:
+    """Transactional PostgreSQL upsert, without replacing historical tables.
+
+    A unique index enforces identity across retries. Advisory locks serialize
+    first creation/schema changes across our writers. Existing duplicate/NULL
+    identities fail and roll back instead of silently deleting legacy records.
+    DQ counts describe the input/processed frames, not INSERT row counts.
+    """
+    if schema not in {"raw", "processed"} or not frames or set(frames) != set(specs):
+        raise ValueError("Invalid timeseries group")
+    if any(table != spec.table for table, spec in specs.items()):
+        raise ValueError("Table/spec mismatch")
+    prepared = {
+        table: _prepare_timeseries_frame(frame, specs[table])
+        for table, frame in frames.items()
+    }
+    with engine.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+        # Stable lock order also handles the weather multi-table group.
+        for table in sorted(prepared):
+            _validate_identifier(table)
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:name, 0))"),
+                {"name": f"{schema}.{table}"},
+            )
+        for table, frame in prepared.items():
+            stage = _make_staging_identifier(table, schema)
+            target = f'"{schema}"."{table}"'
+            staging = f'"{schema}"."{stage}"'
+            # Forecast rain amounts include text such as '강수없음'. Keep a
+            # stable storage type even when the first batch is entirely numeric.
+            if table == "weather_ultra_fcst" and "fcstValue" in frame:
+                frame = frame.copy()
+                frame["fcstValue"] = frame["fcstValue"].astype("string")
+            _write_staging_frame(connection, frame, schema, stage)
+            connection.execute(text(f'CREATE TABLE IF NOT EXISTS {target} (LIKE {staging})'))
+            connection.execute(text(f'LOCK TABLE {target} IN SHARE ROW EXCLUSIVE MODE'))
+            # PROCESSED can omit all-NULL columns on its first run. Add columns
+            # when later observations supply them, preserving historical rows.
+            stage_types = connection.execute(
+                text("SELECT attname, format_type(atttypid, atttypmod) "
+                     "FROM pg_attribute WHERE attrelid = to_regclass(:name) "
+                     "AND attnum > 0 AND NOT attisdropped"),
+                {"name": f"{schema}.{stage}"},
+            ).all()
+            for column, sql_type in stage_types:
+                _validate_column_identifier(column)
+                connection.execute(text(
+                    f'ALTER TABLE {target} ADD COLUMN IF NOT EXISTS "{column}" {sql_type}'
+                ))
+            if table == "weather_ultra_fcst" and "fcstValue" in frame:
+                connection.execute(text(
+                    f'ALTER TABLE {target} ALTER COLUMN "fcstValue" TYPE TEXT '
+                    'USING "fcstValue"::text'
+                ))
+            if table == "air_quality":
+                _backfill_air_quality_observation_keys(connection, schema)
+            keys = specs[table].upsert_key
+            for key in keys:
+                connection.execute(text(f'ALTER TABLE {target} ALTER COLUMN "{key}" SET NOT NULL'))
+            key_sql = ", ".join(f'"{key}"' for key in keys)
+            index = _validate_identifier(
+                f"uq_{table}_observation_v2" if table == "air_quality"
+                else f"uq_{table}_observation"
+            )
+            connection.execute(text(
+                f'CREATE UNIQUE INDEX IF NOT EXISTS "{index}" ON {target} ({key_sql})'
+            ))
+            if table == "air_quality":
+                # Replace the obsolete key constraint only after the stricter
+                # measured-or-captured identity has been validated/indexed.
+                connection.execute(text(f'DROP INDEX IF EXISTS "{schema}"."uq_air_quality_observation"'))
+                target_columns = connection.execute(
+                    text("SELECT attname FROM pg_attribute WHERE attrelid = to_regclass(:name) "
+                         "AND attnum > 0 AND NOT attisdropped"),
+                    {"name": f"{schema}.{table}"},
+                ).scalars().all()
+                if "dataTime" in target_columns:
+                    connection.execute(text(f'ALTER TABLE {target} ALTER COLUMN "dataTime" DROP NOT NULL'))
+            columns = ", ".join(f'"{column}"' for column in frame.columns)
+            updates = ", ".join(
+                f'"{column}" = EXCLUDED."{column}"'
+                for column in frame.columns if column not in keys
+            )
+            if schema == "processed":
+                target_columns = connection.execute(
+                    text("SELECT attname FROM pg_attribute "
+                         "WHERE attrelid = to_regclass(:name) "
+                         "AND attnum > 0 AND NOT attisdropped"),
+                    {"name": f"{schema}.{table}"},
+                ).scalars().all()
+                # A processor intentionally drops fully NULL columns. An
+                # updated observation must not retain its previous value.
+                cleared = [
+                    f'"{_validate_column_identifier(column)}" = NULL'
+                    for column in target_columns if column not in frame.columns
+                ]
+                updates = ", ".join(filter(None, [updates, *cleared]))
+            action = f"DO UPDATE SET {updates}" if updates else "DO NOTHING"
+            connection.execute(text(
+                f'INSERT INTO {target} ({columns}) SELECT {columns} FROM {staging} WHERE TRUE '
+                f'ON CONFLICT ({key_sql}) {action}'
+            ))
+            connection.execute(text(f'DROP TABLE {staging}'))
+
+
+def upsert_raw_dataset_group(
+    raw_frames: Mapping[str, pd.DataFrame],
+    engine: Engine | None = None,
+) -> None:
+    """Collector entry point; the metadata owns the observation identity."""
+    registered = {
+        table.table: table for dataset in get_dataset_specs().values()
+        for table in dataset.tables
+    }
+    specs = {table: registered[table] for table in raw_frames}
+    # Validate before opening a connection, including rejection of snapshots.
+    for table, frame in raw_frames.items():
+        _prepare_timeseries_frame(frame, specs[table])
+    if not raw_frames:
+        raise ValueError("Empty timeseries group")
+    own_engine = engine is None
+    db_engine = engine or create_db_engine()
+    try:
+        _upsert_timeseries_group(db_engine, raw_frames, specs, schema="raw")
+    finally:
+        if own_engine:
+            db_engine.dispose()
+
+
 def read_raw_table_if_exists(
     table: str,
     engine: Engine | None = None,
@@ -673,7 +857,7 @@ def _process_dataset_frames(
             table_spec.processor,
             raw_frame,
             allow_empty=table_spec.allow_empty,
-            dedup_keys=table_spec.primary_key,
+            dedup_keys=table_spec.upsert_key or table_spec.primary_key,
         )
 
         if processed_frame.empty and not table_spec.allow_empty:
@@ -727,7 +911,7 @@ def load_dataset_from_raw(
     dict[str, tuple[int, int]],
     dict[str, DQProfileResult],
 ]:
-    """RAW DB logical dataset 전체를 처리하고 PROCESSED를 원자 교체한다."""
+    """RAW 전체에 기존 DQ를 수행하고 metadata의 PROCESSED 적재 정책을 적용한다."""
 
     if spec.source_kind is not SourceKind.RAW_DATABASE:
         raise ValueError(f"{spec.name}: RAW_DATABASE dataset이 아닙니다.")
@@ -772,13 +956,23 @@ def load_dataset_from_raw(
             "db",
             durations,
         ):
-            _atomic_replace_processed_group(
-                db_engine,
-                processed_frames,
-                primary_keys=primary_keys,
-                indexes=indexes,
-                allow_empty_tables=allow_empty_tables,
-            )
+            policies = {table.load_policy for table in spec.tables}
+            if policies == {LoadPolicy.TIMESERIES}:
+                _upsert_timeseries_group(
+                    db_engine, processed_frames,
+                    {table.table: table for table in spec.tables},
+                    schema="processed",
+                )
+            elif policies == {LoadPolicy.SNAPSHOT}:
+                _atomic_replace_processed_group(
+                    db_engine,
+                    processed_frames,
+                    primary_keys=primary_keys,
+                    indexes=indexes,
+                    allow_empty_tables=allow_empty_tables,
+                )
+            else:
+                raise ValueError("Mixed load policies in one dataset are not supported")
     finally:
         if own_engine and db_engine is not None:
             db_engine.dispose()

@@ -13,7 +13,7 @@ PIPELINE_DIR = Path(__file__).resolve().parents[1]
 if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
-from pipeline_elt import replace_raw_dataset_group
+from pipeline_elt import upsert_raw_dataset_group
 
 
 # ==================================================
@@ -395,7 +395,7 @@ def main():
         f"{len(fcst_df):,}"
     )
 
-    replace_raw_dataset_group(
+    upsert_raw_dataset_group(
         {
             "weather_ultra_ncst": ncst_df,
             "weather_ultra_fcst": fcst_df,

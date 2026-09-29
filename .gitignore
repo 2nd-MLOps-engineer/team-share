@@ -12,3 +12,10 @@
 /M3_data_pipeline/data/processed/
 /M3_data_pipeline/data/logs/
 /data/db_backup/
+
+# Local runtime / reference artifacts
+/M3_data_pipeline/logs/
+/M3_data_pipeline/*.log
+/M3_data_pipeline/*.txt
+/.reference/
+*.dump

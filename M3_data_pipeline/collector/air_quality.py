@@ -15,7 +15,7 @@ PIPELINE_DIR = Path(__file__).resolve().parents[1]
 if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
-from pipeline_elt import replace_raw_dataset_group
+from pipeline_elt import upsert_raw_dataset_group
 
 
 # =========================================================
@@ -483,14 +483,14 @@ def collect_all_sidos():
         )
 
         print(
-            "기존 정상 RAW DB snapshot은 "
-            "덮어쓰지 않습니다."
+            "실패 시도의 기존 RAW 데이터는 유지하고 "
+            "성공한 시도 데이터만 누적합니다."
         )
 
-        raise RuntimeError(
-            "재시도 후에도 수집하지 못한 "
-            "시도가 있습니다: "
+        print(
+            "[WARNING] 일부 시도 수집 실패: "
             + ", ".join(failed_sido)
+            + " / 성공한 시도 데이터만 누적 저장합니다."
         )
 
     # -----------------------------------------------------
@@ -568,7 +568,7 @@ def collect_all_sidos():
 # 11. RAW DB 저장
 # =========================================================
 
-replace_raw_dataset_group(
+upsert_raw_dataset_group(
     {"air_quality": df_all}
 )
 

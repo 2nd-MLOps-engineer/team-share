@@ -15,6 +15,15 @@ if str(PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(PIPELINE_DIR))
 
 from pipeline_elt import replace_raw_dataset_group
+from jsonl_checkpoint import (
+    append_checkpoint_entry,
+    load_checkpoint,
+    remove_checkpoint_after_success,
+    rewrite_checkpoint,
+    unit_fingerprint,
+    validate_entries,
+    validate_meta,
+)
 
 
 # --------------------------------------------------
@@ -27,6 +36,9 @@ from pipeline_elt import replace_raw_dataset_group
 # ROOT_DIR:
 # team-share/
 ROOT_DIR = Path(__file__).resolve().parents[2]
+CHECKPOINT_PATH = (
+    ROOT_DIR / "data" / "raw" / "facility" / "facility_checkpoint.jsonl"
+)
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 
@@ -144,228 +156,164 @@ def fetch_page(page_no):
     return None, None
 
 
+def page_key(page_no):
+    return str(page_no)
+
+
+def make_checkpoint_meta(total_count, total_pages):
+    keys = [page_key(page_no) for page_no in range(1, total_pages + 1)]
+    return {
+        "type": "meta",
+        "version": 1,
+        "dataset": "facility",
+        "source_url": URL,
+        "num_of_rows": NUM_OF_ROWS,
+        "total_count": total_count,
+        "total_pages": total_pages,
+        "unit_count": total_pages,
+        "unit_fingerprint": unit_fingerprint(keys),
+    }
+
+
+def make_page_entry(page_no, items):
+    return {
+        "type": "unit",
+        "key": page_key(page_no),
+        "status": "success",
+        "unit": {"page_no": page_no},
+        "records": items,
+        "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+
+
+def records_in_page_order(total_pages, entries):
+    records = []
+    for page_no in range(1, total_pages + 1):
+        entry = entries.get(page_key(page_no))
+        if entry is not None:
+            records.extend(entry.get("records") or [])
+    return records
+
+
 # --------------------------------------------------
 # 5. 전체 수집 시작
 # --------------------------------------------------
 
 def main():
-
     start_time = time.perf_counter()
-
-    all_items = []
     failed_pages = []
-
     print("=" * 60)
     print("시설 데이터 수집 시작")
     print("=" * 60)
-
-    # --------------------------------------------------
-    # 첫 페이지 호출
-    # --------------------------------------------------
-
-    page_start = time.perf_counter()
-
-    body, items = fetch_page(1)
-
-    if body is None:
-        raise RuntimeError(
-            "첫 페이지 수집에 실패했습니다. "
-            "전체 수집을 중단합니다."
+    meta, checkpoint_entries = load_checkpoint(CHECKPOINT_PATH)
+    if meta is None:
+        page_start = time.perf_counter()
+        body, items = fetch_page(1)
+        if body is None:
+            raise RuntimeError(
+                "첫 페이지 수집에 실패했습니다. 전체 수집을 중단합니다."
+            )
+        total_count = int(body["totalCount"])
+        if total_count <= 0:
+            raise RuntimeError("시설 API totalCount가 0입니다. 기존 파일을 유지합니다.")
+        total_pages = math.ceil(total_count / NUM_OF_ROWS)
+        meta = make_checkpoint_meta(total_count, total_pages)
+        first_entry = make_page_entry(1, items)
+        checkpoint_entries = {page_key(1): first_entry}
+        rewrite_checkpoint(CHECKPOINT_PATH, meta, checkpoint_entries)
+        print(
+            f"[1/{total_pages}] 누적 {len(items):,}건 | "
+            f"페이지 {time.perf_counter() - page_start:.2f}초"
         )
-
-    page_elapsed = time.perf_counter() - page_start
-
-    total_count = int(body["totalCount"])
-
-    if total_count <= 0:
-        raise RuntimeError("시설 API totalCount가 0입니다. 기존 파일을 유지합니다.")
-
-    total_pages = math.ceil(
-        total_count / NUM_OF_ROWS
-    )
-
-    print()
-    print("=" * 60)
-    print("전체 건수:", f"{total_count:,}")
-    print("페이지당 요청 건수:", NUM_OF_ROWS)
-    print("필요 호출 횟수:", total_pages)
-    print("=" * 60)
-
-    # --------------------------------------------------
-    # 일일 트래픽 확인
-    # --------------------------------------------------
+    else:
+        validate_meta(
+            meta,
+            {
+                "version": 1,
+                "dataset": "facility",
+                "source_url": URL,
+                "num_of_rows": NUM_OF_ROWS,
+            },
+            ("version", "dataset", "source_url", "num_of_rows"),
+            CHECKPOINT_PATH,
+        )
+        total_count = int(meta["total_count"])
+        total_pages = int(meta["total_pages"])
+        expected_meta = make_checkpoint_meta(total_count, total_pages)
+        validate_meta(
+            meta,
+            expected_meta,
+            ("unit_count", "unit_fingerprint"),
+            CHECKPOINT_PATH,
+        )
+        validate_entries(
+            checkpoint_entries,
+            (page_key(page_no) for page_no in range(1, total_pages + 1)),
+            CHECKPOINT_PATH,
+        )
+        print(f"체크포인트 재개: 완료 페이지 {len(checkpoint_entries):,}개")
 
     if total_pages > DAILY_LIMIT:
         raise RuntimeError(
-            f"필요 호출 횟수 {total_pages}회가 "
-            f"일일 트래픽 제한 "
+            f"필요 호출 횟수 {total_pages}회가 일일 트래픽 제한 "
             f"{DAILY_LIMIT}회를 초과합니다."
         )
 
-    # --------------------------------------------------
-    # 첫 페이지 데이터 저장
-    # --------------------------------------------------
+    print("전체 건수:", f"{total_count:,}")
+    print("페이지당 요청 건수:", NUM_OF_ROWS)
+    print("필요 호출 횟수:", total_pages)
 
-    all_items.extend(items)
-
-    elapsed = time.perf_counter() - start_time
-
-    print()
-    print("첫 페이지 실제 건수:", len(items))
-
-    print(
-        f"[1/{total_pages}] "
-        f"누적 {len(all_items):,}건 | "
-        f"페이지 {page_elapsed:.2f}초 | "
-        f"경과 {format_time(elapsed)}"
-    )
-
-    # --------------------------------------------------
-    # 2페이지 ~ 마지막 페이지
-    # --------------------------------------------------
-
-    for page_no in range(2, total_pages + 1):
-
+    for page_no in range(1, total_pages + 1):
+        if page_key(page_no) in checkpoint_entries:
+            continue
         page_start = time.perf_counter()
-
         body, items = fetch_page(page_no)
-
-        # 재시도까지 모두 실패한 페이지
         if body is None:
             failed_pages.append(page_no)
-
-            print(
-                f"[{page_no}/{total_pages}] "
-                f"최종 수집 실패"
-            )
-
+            print(f"[{page_no}/{total_pages}] 최종 수집 실패")
             continue
-
-        all_items.extend(items)
-
-        page_elapsed = (
-            time.perf_counter() - page_start
-        )
-
-        elapsed = (
-            time.perf_counter() - start_time
-        )
-
-        avg_time = elapsed / page_no
-
-        remaining_pages = (
-            total_pages - page_no
-        )
-
-        eta = avg_time * remaining_pages
-
+        entry = make_page_entry(page_no, items)
+        append_checkpoint_entry(CHECKPOINT_PATH, entry)
+        checkpoint_entries[page_key(page_no)] = entry
+        all_items = records_in_page_order(total_pages, checkpoint_entries)
+        elapsed = time.perf_counter() - start_time
+        avg_time = elapsed / max(len(checkpoint_entries), 1)
+        remaining_pages = total_pages - len(checkpoint_entries)
         print(
             f"[{page_no}/{total_pages}] "
             f"누적 {len(all_items):,}건 | "
-            f"페이지 {page_elapsed:.2f}초 | "
+            f"페이지 {time.perf_counter() - page_start:.2f}초 | "
             f"경과 {format_time(elapsed)} | "
-            f"예상 남은시간 {format_time(eta)}"
+            f"예상 남은시간 {format_time(avg_time * remaining_pages)}"
         )
-
         time.sleep(REQUEST_DELAY)
 
-    # --------------------------------------------------
-    # 6. 수집 결과 검증
-    # --------------------------------------------------
-
-    print()
-    print("=" * 60)
-    print("수집 결과 검증")
-    print("=" * 60)
-
-    print(
-        "API 전체 건수:",
-        f"{total_count:,}"
-    )
-
-    print(
-        "실제 수집 건수:",
-        f"{len(all_items):,}"
-    )
-
-    # 실패 페이지가 존재하면 저장 금지
+    all_items = records_in_page_order(total_pages, checkpoint_entries)
     if failed_pages:
-
-        print(
-            "실패 페이지:",
-            failed_pages
-        )
-
         raise RuntimeError(
-            "수집 실패 페이지가 존재합니다. "
+            f"수집 실패 페이지가 존재합니다: {failed_pages}. "
             "불완전한 RAW DB snapshot은 저장하지 않습니다."
         )
-
-    # totalCount와 실제 건수 비교
-    if len(all_items) != total_count:
-
+    if len(checkpoint_entries) != total_pages:
         raise RuntimeError(
-            f"건수 불일치: "
-            f"API={total_count:,} / "
-            f"수집={len(all_items):,}. "
+            "완료 페이지 수가 전체 페이지 수와 다릅니다. "
+            "불완전한 RAW DB snapshot은 저장하지 않습니다."
+        )
+    if len(all_items) != total_count:
+        raise RuntimeError(
+            f"건수 불일치: API={total_count:,} / 수집={len(all_items):,}. "
             f"RAW DB snapshot은 저장하지 않습니다."
         )
-
-    print("건수 검증: 정상")
-
-
-    # --------------------------------------------------
-    # 7. DataFrame 생성
-    # --------------------------------------------------
-
-    print()
-    print("DataFrame 생성 중...")
-
     df = pd.DataFrame(all_items)
-
-    print(
-        "최종 수집 건수:",
-        f"{len(df):,}"
-    )
-
-    print(
-        "컬럼 수:",
-        len(df.columns)
-    )
-
-
-    # --------------------------------------------------
-    # 8. RAW DB 저장
-    # --------------------------------------------------
-
-    print()
-    print("RAW DB 저장 중...")
     replace_raw_dataset_group(
         {"facility": df}
     )
-
-
-    # --------------------------------------------------
-    # 9. 최종 결과
-    # --------------------------------------------------
-
-    total_elapsed = (
-        time.perf_counter() - start_time
-    )
-
-    print()
-    print("=" * 60)
+    remove_checkpoint_after_success(CHECKPOINT_PATH)
+    total_elapsed = time.perf_counter() - start_time
     print("수집 완료")
-    print(
-        "최종 수집 건수:",
-        f"{len(df):,}"
-    )
+    print("최종 수집 건수:", f"{len(df):,}")
     print("RAW DB: raw.facility")
-    print(
-        "전체 소요시간:",
-        format_time(total_elapsed)
-    )
-    print("=" * 60)
+    print("전체 소요시간:", format_time(total_elapsed))
 
 
 # --------------------------------------------------
