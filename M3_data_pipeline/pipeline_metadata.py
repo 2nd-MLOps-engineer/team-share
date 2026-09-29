@@ -17,6 +17,11 @@ class SourceKind(str, Enum):
     RAW_DATABASE = "raw_database"
 
 
+class LoadPolicy(str, Enum):
+    SNAPSHOT = "snapshot"
+    TIMESERIES = "timeseries"
+
+
 @dataclass(frozen=True)
 class IndexSpec:
     name: str
@@ -33,6 +38,12 @@ class TableSpec:
     allow_empty: bool = False
     primary_key: tuple[str, ...] = ()
     indexes: tuple[IndexSpec, ...] = ()
+    load_policy: LoadPolicy = LoadPolicy.SNAPSHOT
+    upsert_key: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.load_policy is LoadPolicy.TIMESERIES and not self.upsert_key:
+            raise ValueError(f"{self.table}: timeseries requires an upsert key")
 
 @dataclass(frozen=True)
 class DatasetSpec:
@@ -104,11 +115,15 @@ STATIC_DATASETS = (
                 table="weather_ultra_ncst",
                 processor="weather_ultra_ncst",
                 source_kind=SourceKind.RAW_DATABASE,
+                load_policy=LoadPolicy.TIMESERIES,
+                upsert_key=("baseDate", "baseTime", "nx", "ny", "category"),
             ),
             TableSpec(
                 table="weather_ultra_fcst",
                 processor="weather_ultra_fcst",
                 source_kind=SourceKind.RAW_DATABASE,
+                load_policy=LoadPolicy.TIMESERIES,
+                upsert_key=("baseDate", "baseTime", "nx", "ny", "category", "fcstDate", "fcstTime"),
             ),
         ),
         run_order=10,
@@ -122,6 +137,8 @@ STATIC_DATASETS = (
                 table="air_quality",
                 processor="air_quality",
                 source_kind=SourceKind.RAW_DATABASE,
+                load_policy=LoadPolicy.TIMESERIES,
+                upsert_key=("sidoName", "stationName", "observation_time_key"),
             ),
         ),
         run_order=20,
@@ -255,20 +272,6 @@ STATIC_DATASETS = (
         ),
         default_attempts=2,
         run_order=90,
-    ),
-    DatasetSpec(
-        name="bus_stop",
-        collector_script="collector/busstop_api.py",
-        default_cron="0 3 28 * *",
-        tables=(
-            TableSpec(
-                table="bus_stop",
-                processor="bus_stop",
-                source_kind=SourceKind.RAW_DATABASE,
-            ),
-        ),
-        run_order=1000,
-        run_last=True,
     ),
 )
 

@@ -265,9 +265,12 @@ def get_operations_summary(
             COUNT(*) FILTER (
                 WHERE dq_status = 'CHECK_FAILED'
             ) AS dq_failed,
-
             AVG(elapsed_seconds) AS avg_duration_seconds,
             MAX(elapsed_seconds) AS max_duration_seconds,
+
+                        ARRAY_AGG(DISTINCT job_id) FILTER (
+                WHERE run_status = 'WARNING'
+            ) AS warning_jobs,
 
             ARRAY_AGG(DISTINCT job_id) FILTER (
                 WHERE run_status = 'FAILED'
@@ -276,8 +279,14 @@ def get_operations_summary(
             ARRAY_AGG(DISTINCT dataset) FILTER (
                 WHERE dq_status = 'CHECK_FAILED'
                   AND dataset IS NOT NULL
-            ) AS dq_failed_datasets
+            ) AS dq_failed_datasets,
 
+            (
+                ARRAY_AGG(
+                    job_id
+                    ORDER BY elapsed_seconds DESC NULLS LAST
+                )
+            )[1] AS max_duration_job
         FROM monitoring.pipeline_run_history
         WHERE started_at >= :period_start
           AND started_at < :period_end
@@ -310,8 +319,10 @@ def get_operations_summary(
             if row["max_duration_seconds"] is not None
             else None
         ),
+        "warning_jobs": list(row["warning_jobs"] or []),
         "failed_jobs": list(row["failed_jobs"] or []),
         "dq_failed_datasets": list(
             row["dq_failed_datasets"] or []
         ),
+        "max_duration_job": row["max_duration_job"],
     }

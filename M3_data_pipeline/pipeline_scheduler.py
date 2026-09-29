@@ -371,6 +371,15 @@ def run_job(
             total_seconds,
         )
 
+        if dq_status == "CHECK_FAILED":
+            send_dq_failure_alert(
+                job_id=job_id,
+                run_id=run_id,
+                dq_status=dq_status,
+                dq_results=dq_results,
+                elapsed_seconds=total_seconds,
+            )
+
     except Exception as error:
         total_seconds = time.monotonic() - job_started
 
@@ -434,23 +443,26 @@ def run_job(
 
 
 def send_scheduled_operations_summary() -> None:
-    """08:00 / 17:00 KST 기준 파이프라인 운영 현황을 Discord로 전송한다."""
+    """09:15 / 17:00 KST 기준 파이프라인 운영 현황을 Discord로 전송한다."""
     load_environment()
 
     now = datetime.now(TIMEZONE)
 
-    if now.hour == 8:
+    if now.hour == 9 and now.minute == 15:
         period_end = now.replace(
-            hour=8,
-            minute=0,
+            hour=9,
+            minute=15,
             second=0,
             microsecond=0,
         )
         period_start = (
             period_end - timedelta(days=1)
-        ).replace(hour=17)
+        ).replace(
+            hour=17,
+            minute=0,
+        )
 
-        period_label = "Night Operations"
+        period_label = "주간 운영 결과"
 
     elif now.hour == 17:
         period_end = now.replace(
@@ -459,14 +471,17 @@ def send_scheduled_operations_summary() -> None:
             second=0,
             microsecond=0,
         )
-        period_start = period_end.replace(hour=8)
+        period_start = period_end.replace(
+            hour=9,
+            minute=15,
+        )
 
-        period_label = "Day Operations"
+        period_label = "운영 결과 · 야간"
 
     else:
         LOGGER.warning(
-            "operations_summary status=SKIPPED unexpected_hour=%s",
-            now.hour,
+            "operations_summary status=SKIPPED unexpected_time=%s",
+            now.isoformat(),
         )
         return
 
@@ -505,7 +520,6 @@ def send_scheduled_operations_summary() -> None:
     finally:
         engine.dispose()
 
-
 def create_scheduler(*, skip_db: bool = False) -> BlockingScheduler:
     load_environment()
     scheduler = BlockingScheduler(
@@ -533,12 +547,24 @@ def create_scheduler(*, skip_db: bool = False) -> BlockingScheduler:
     scheduler.add_job(
         send_scheduled_operations_summary,
         trigger=CronTrigger(
-            hour="8,17",
+            hour=9,
+            minute=15,
+            timezone=TIMEZONE,
+        ),
+        id="operations_summary_morning",
+        name="09:15 pipeline operations summary",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        send_scheduled_operations_summary,
+        trigger=CronTrigger(
+            hour=17,
             minute=0,
             timezone=TIMEZONE,
         ),
-        id="operations_summary",
-        name="08:00 / 17:00 pipeline operations summary",
+        id="operations_summary_evening",
+        name="17:00 pipeline operations summary",
         replace_existing=True,
     )
 
@@ -567,6 +593,13 @@ class DQAuditFilter(logging.Filter):
         return record.getMessage().startswith("dq_audit=")
 
 
+class ExcludeDQAuditFilter(logging.Filter):
+    """터미널에서는 상세 dq_audit JSON 레코드를 숨긴다."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith("dq_audit=")
+
+
 def configure_logging() -> None:
     """메인 데이터 파이프라인의 콘솔 및 영구 파일 로그를 설정한다."""
 
@@ -587,6 +620,7 @@ def configure_logging() -> None:
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
+    console_handler.addFilter(ExcludeDQAuditFilter())
     root_logger.addHandler(console_handler)
 
     # 2. 전체 파이프라인 실행 로그

@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import unittest
@@ -12,7 +13,64 @@ if TEST_DEPENDENCIES.is_dir():
 sys.path.insert(0, str(PIPELINE_DIR))
 
 import pipeline_scheduler as scheduler  # noqa: E402
+import webhook_notifier as notifier  # noqa: E402
 from pipeline_metadata import DatasetSpec, SourceKind, TableSpec  # noqa: E402
+
+
+class DQAuditLoggingFilterTest(unittest.TestCase):
+    @staticmethod
+    def record(message):
+        return logging.LogRecord(
+            name="pipeline_elt",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg=message,
+            args=(),
+            exc_info=None,
+        )
+
+    def test_dq_json_is_hidden_from_console_but_kept_for_dq_file(self):
+        dq_record = self.record('dq_audit={"dataset":"facility"}')
+        normal_record = self.record("job=facility status=SUCCESS")
+
+        self.assertFalse(scheduler.ExcludeDQAuditFilter().filter(dq_record))
+        self.assertTrue(scheduler.DQAuditFilter().filter(dq_record))
+        self.assertTrue(scheduler.ExcludeDQAuditFilter().filter(normal_record))
+        self.assertFalse(scheduler.DQAuditFilter().filter(normal_record))
+
+    def test_console_exclusion_does_not_filter_file_handlers(self):
+        root_logger = MagicMock()
+        console_handler = MagicMock()
+        pipeline_handler = MagicMock()
+        error_handler = MagicMock()
+        dq_handler = MagicMock()
+
+        with (
+            patch.object(
+                scheduler.logging,
+                "getLogger",
+                return_value=root_logger,
+            ),
+            patch.object(
+                scheduler.logging,
+                "StreamHandler",
+                return_value=console_handler,
+            ),
+            patch.object(
+                scheduler,
+                "RotatingFileHandler",
+                side_effect=[pipeline_handler, error_handler, dq_handler],
+            ),
+        ):
+            scheduler.configure_logging()
+
+        console_filter = console_handler.addFilter.call_args.args[0]
+        dq_filter = dq_handler.addFilter.call_args.args[0]
+        self.assertIsInstance(console_filter, scheduler.ExcludeDQAuditFilter)
+        self.assertIsInstance(dq_filter, scheduler.DQAuditFilter)
+        pipeline_handler.addFilter.assert_not_called()
+        error_handler.addFilter.assert_not_called()
 
 
 class PipelineSchedulerRetryTest(unittest.TestCase):
@@ -150,6 +208,51 @@ class PipelineSchedulerRetryTest(unittest.TestCase):
         run_script.assert_called_once_with(spec)
         load_database.assert_called_once_with(spec, engine)
 
+    def test_check_failed_records_warning_then_sends_dq_alert(self):
+        engine = MagicMock()
+        dq_result = MagicMock()
+        dq_result.as_dict.return_value = {"status": "CHECK_FAILED"}
+        events = []
+
+        with (
+            patch.dict(scheduler.JOB_SPECS, {"facility": self.spec}, clear=True),
+            patch.object(scheduler, "_run_script"),
+            patch.object(scheduler, "create_db_engine", return_value=engine),
+            patch.object(
+                scheduler,
+                "_process_and_load_dataset",
+                return_value=(
+                    {"facility": (1, 0)},
+                    {"facility": dq_result},
+                ),
+            ),
+            patch.object(
+                scheduler,
+                "write_pipeline_run_history",
+                side_effect=lambda *args, **kwargs: events.append("history"),
+            ) as write_history,
+            patch.object(
+                notifier,
+                "send_discord_message",
+                side_effect=lambda *args, **kwargs: events.append("alert") or True,
+            ) as send_discord,
+            patch.object(scheduler, "send_pipeline_failure_alert") as failure_alert,
+        ):
+            scheduler.run_job("facility")
+
+        self.assertEqual(events, ["history", "alert"])
+        self.assertEqual(write_history.call_args.kwargs["run_status"], "WARNING")
+        self.assertEqual(
+            write_history.call_args.kwargs["dq_results"],
+            {"facility": dq_result},
+        )
+        send_discord.assert_called_once()
+        self.assertIn(
+            "우심운까 데이터 품질 이상 감지",
+            send_discord.call_args.args[0],
+        )
+        failure_alert.assert_not_called()
+
 
 class RunAllOrderingTest(unittest.TestCase):
     @staticmethod
@@ -171,7 +274,7 @@ class RunAllOrderingTest(unittest.TestCase):
     def test_run_last_is_a_final_phase_regardless_of_numeric_order(self):
         specs = {
             "late_regular": self.spec("late_regular", 9999),
-            "bus_stop": self.spec("bus_stop", -1, run_last=True),
+            "final_dataset": self.spec("final_dataset", -1, run_last=True),
             "early_regular": self.spec("early_regular", 1),
         }
 
@@ -180,14 +283,14 @@ class RunAllOrderingTest(unittest.TestCase):
 
         self.assertEqual(
             phases,
-            (("early_regular", "late_regular"), ("bus_stop",)),
+            (("early_regular", "late_regular"), ("final_dataset",)),
         )
 
     def test_prior_phase_failure_skips_expensive_final_phase(self):
         specs = {
             "first": self.spec("first", 1),
             "second": self.spec("second", 2),
-            "bus_stop": self.spec("bus_stop", 3, run_last=True),
+            "final_dataset": self.spec("final_dataset", 3, run_last=True),
         }
         called = []
 
@@ -204,7 +307,7 @@ class RunAllOrderingTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                "선행 실패로 미실행: bus_stop",
+                "선행 실패로 미실행: final_dataset",
             ):
                 scheduler.main(["--run-all-once", "--skip-db"])
 

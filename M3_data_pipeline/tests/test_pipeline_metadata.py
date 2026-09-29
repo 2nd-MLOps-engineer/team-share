@@ -66,14 +66,14 @@ class PipelineMetadataTest(unittest.TestCase):
         self.assertFalse(warning["weather_warning"].allow_empty)
         self.assertTrue(warning["weather_warning_status"].allow_empty)
 
-    def test_bus_stop_is_the_only_final_barrier_dataset(self):
+    def test_default_datasets_have_no_final_barrier(self):
         run_last = [
             dataset.name
             for dataset in self.specs.values()
             if dataset.run_last
         ]
 
-        self.assertEqual(run_last, ["bus_stop"])
+        self.assertEqual(run_last, [])
 
 
 if __name__ == "__main__":

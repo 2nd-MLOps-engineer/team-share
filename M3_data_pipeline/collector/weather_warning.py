@@ -614,7 +614,7 @@ def main():
 
         status_new_df = collect_warning_status()
         summary["status_api"] = len(status_new_df)
-        current_df = save_status_current_raw(status_new_df)
+        current_df = build_status_current_raw(status_new_df)
         summary["status_current"] = len(current_df)
 
         replace_warning_raw_group(warning_raw_df, current_df)

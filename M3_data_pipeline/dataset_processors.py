@@ -69,6 +69,7 @@ if __package__:
         conversion_audit_active,
         mark_conversion_audit_unavailable,
         record_conversion_step,
+        record_removal_reason,
     )
 else:
     from dq_profiler import (
@@ -76,6 +77,7 @@ else:
         conversion_audit_active,
         mark_conversion_audit_unavailable,
         record_conversion_step,
+        record_removal_reason,
     )
 
 
@@ -414,6 +416,8 @@ def filter_korea_coordinates(
     frame: pd.DataFrame,
     latitude: str,
     longitude: str,
+    *,
+    removal_reason: str | None = None,
 ) -> pd.DataFrame:
     """
     대표 위도/경도를 숫자형으로 변환하고 대한민국 범위를 검증한다.
@@ -455,7 +459,10 @@ def filter_korea_coordinates(
             132.0,
             inclusive="both",
         )
-    )
+    ).fillna(False)
+
+    if removal_reason is not None:
+        record_removal_reason(frame.loc[~valid], removal_reason)
 
     return frame.loc[valid].copy()
 
@@ -558,6 +565,8 @@ def format_elapsed(
 def deduplicate_valid_keys(
     frame: pd.DataFrame,
     keys: tuple[str, ...],
+    *,
+    removal_reason: str | None = None,
 ) -> pd.DataFrame:
     """
     모든 key 값이 존재하는 행만 중복 제거한다.
@@ -585,6 +594,13 @@ def deduplicate_valid_keys(
             keep="last",
         )
     )
+
+    if removal_reason is not None:
+        duplicate = valid_key & frame.duplicated(
+            subset=list(keys),
+            keep="last",
+        )
+        record_removal_reason(frame.loc[duplicate], removal_reason)
 
     invalid_rows = frame.loc[~valid_key]
 
@@ -739,11 +755,46 @@ def drop_fully_empty_columns(
         empty_column_stats,
     )
 
+def add_air_quality_observation_key(frame: pd.DataFrame) -> pd.DataFrame:
+    """Distinguish measured observations from undated station status captures.
+
+    Preserve the source dataTime, including NULL. A collection timestamp is
+    only an identity for an undated capture, never a fabricated measurement.
+    No current clock, arbitrary sentinel, or payload hash participates in keys.
+    """
+    result = frame.copy()
+    times = normalize_nulls(pd.DataFrame({
+        column: frame[column] if column in frame else pd.Series(None, index=frame.index, dtype="object")
+        for column in ("dataTime", "collected_at")
+    }))
+    identities = []
+    for measured, collected in times.itertuples(index=False, name=None):
+        dated = pd.notna(measured)
+        value = measured if dated else collected
+        source = "dataTime" if dated else "collected_at"
+        if pd.isna(value):
+            raise ValueError("air_quality: missing dataTime and collected_at; observation identity unavailable")
+        # API/local timestamps are unzoned Korean local time. Reject numeric,
+        # malformed or zoned values rather than interpreting them as an epoch.
+        if not isinstance(value, (str, pd.Timestamp)) and not hasattr(value, "isoformat"):
+            raise ValueError(f"air_quality: invalid {source} observation timestamp")
+        try:
+            timestamp = pd.Timestamp(value)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValueError(f"air_quality: invalid {source} observation timestamp") from exc
+        if pd.isna(timestamp) or timestamp.tzinfo is not None:
+            raise ValueError(f"air_quality: invalid {source} observation timestamp")
+        prefix = "measured:" if dated else "collected:"
+        identities.append(prefix + timestamp.isoformat())
+    result["observation_time_key"] = pd.Series(identities, index=frame.index, dtype="string")
+    return result
+
+
 def process_air_quality(
     raw: pd.DataFrame,
 ) -> pd.DataFrame:
 
-    frame = normalize_nulls(raw)
+    frame = normalize_nulls(add_air_quality_observation_key(raw))
 
     convert_numeric(
         frame,
@@ -771,14 +822,16 @@ def process_air_quality(
     keys = (
         "sidoName",
         "stationName",
-        "dataTime",
+        "observation_time_key",
     )
 
     if all(
         column in frame.columns
         for column in keys
     ):
-        valid_time = frame["dataTime"].notna()
+        valid_time = frame[list(keys)].notna().all(axis=1)
+        duplicate = valid_time & frame.duplicated(subset=list(keys), keep="last")
+        record_removal_reason(frame.loc[duplicate], "air_quality_duplicate_observation")
 
         frame = pd.concat(
             [
@@ -835,15 +888,18 @@ def process_facility(
     frame = normalize_nulls(raw)
 
     if "faci_stat_nm" in frame.columns:
-        frame = frame.loc[
-            frame["faci_stat_nm"]
-            == "정상운영"
-        ].copy()
+        normal_operation = frame["faci_stat_nm"].eq("정상운영").fillna(False)
+        record_removal_reason(
+            frame.loc[~normal_operation],
+            "facility_status_not_normal_operation",
+        )
+        frame = frame.loc[normal_operation].copy()
 
     frame = filter_korea_coordinates(
         frame,
         "faci_lat",
         "faci_lot",
+        removal_reason="facility_invalid_or_missing_korea_coordinates",
     )
 
     convert_numeric(
@@ -864,6 +920,14 @@ def process_facility(
 
     if "faci_cd" in frame.columns:
         valid_key = frame["faci_cd"].notna()
+        duplicate = valid_key & frame.duplicated(
+            subset=["faci_cd"],
+            keep="last",
+        )
+        record_removal_reason(
+            frame.loc[duplicate],
+            "facility_duplicate_faci_cd",
+        )
 
         frame = pd.concat(
             [
@@ -898,6 +962,7 @@ def process_facility(
             "base_ymd",
             "reg_dt",
             "updt_dt",
+            DQ_LINEAGE_COLUMN,
         )
         if column in frame.columns
     ]
@@ -969,33 +1034,6 @@ def process_public_open_facility(
 
     frame["needs_review"] = (
         ~frame["address_valid"]
-    )
-
-    return frame.reset_index(drop=True)
-
-
-# ============================================================
-# 4. 버스정류장
-# ============================================================
-
-def process_bus_stop(
-    raw: pd.DataFrame,
-) -> pd.DataFrame:
-
-    frame = normalize_nulls(raw)
-
-    frame = filter_korea_coordinates(
-        frame,
-        "latitude",
-        "longitude",
-    )
-
-    frame = deduplicate_valid_keys(
-        frame,
-        (
-            "city_code",
-            "node_id",
-        ),
     )
 
     return frame.reset_index(drop=True)
@@ -1109,7 +1147,6 @@ def process_weather(
     )
 
     possible_keys = (
-        "data_type",
         "baseDate",
         "baseTime",
         "fcstDate",
@@ -1129,6 +1166,7 @@ def process_weather(
         frame = deduplicate_valid_keys(
             frame,
             keys,
+            removal_reason="weather_duplicate_observation",
         )
 
     return frame.reset_index(drop=True)
@@ -1321,6 +1359,7 @@ def process_weather_warning(
             "tmFc",
             "tmSeq",
         ),
+        removal_reason="weather_warning_duplicate_stn_tmfc_tmseq",
     )
 
     return frame.reset_index(drop=True)
@@ -1464,10 +1503,22 @@ def process_weather_warning_status(
         ["_tmFc_sort", "_tmSeq_sort"],
         na_position="first",
     ).iloc[-1]
+    if DQ_LINEAGE_COLUMN in work.columns:
+        record_removal_reason(
+            work.loc[
+                work[DQ_LINEAGE_COLUMN].ne(latest[DQ_LINEAGE_COLUMN])
+            ],
+            "weather_warning_status_superseded_snapshot",
+        )
     rows = (
         _parse_active_weather_warning(latest)
         + _parse_preliminary_weather_warning(latest)
     )
+    if not rows:
+        record_removal_reason(
+            latest.to_frame().T,
+            "weather_warning_status_no_active_or_preliminary_warning",
+        )
     columns = WEATHER_WARNING_STATUS_COLUMNS.copy()
     if DQ_LINEAGE_COLUMN in raw.columns:
         columns.append(DQ_LINEAGE_COLUMN)
@@ -2204,9 +2255,6 @@ PROCESSORS: dict[
 
     "public_open_facility":
         process_public_open_facility,
-
-    "bus_stop":
-        process_bus_stop,
 
     "aed":
         process_aed,

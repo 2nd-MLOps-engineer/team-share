@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
 import re
@@ -45,6 +46,8 @@ from selenium.common.exceptions import (
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+
+from collector.jsonl_checkpoint import atomic_write_json, unit_fingerprint
 
 
 BASE_URL = "https://www.bigdata-culture.kr"
@@ -194,6 +197,82 @@ def product_id(url: str) -> str:
     return values[0]
 
 
+def manifest_path_for(download_dir: Path, urls: Sequence[str]) -> Path:
+    fingerprint = unit_fingerprint(urls)
+    return download_dir / f"culture_manifest_{fingerprint[:16]}.json"
+
+
+def new_download_manifest(urls: Sequence[str], run_download_dir: Path) -> dict:
+    product_ids = [product_id(url) for url in urls]
+    return {
+        "type": "culture_download_manifest",
+        "version": 1,
+        "url_fingerprint": unit_fingerprint(urls),
+        "product_ids": product_ids,
+        "run_download_dir": str(run_download_dir.resolve()),
+        "products": {},
+    }
+
+
+def load_download_manifest(path: Path, urls: Sequence[str]) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            manifest = json.load(file)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AutomationError("download_manifest", f"manifest 읽기 실패: {path}") from exc
+
+    expected = new_download_manifest(urls, Path(manifest.get("run_download_dir", ".")))
+    for field in ("type", "version", "url_fingerprint", "product_ids"):
+        if manifest.get(field) != expected.get(field):
+            raise AutomationError(
+                "download_manifest",
+                f"manifest가 현재 상품 목록과 다름: {path} (field={field})",
+            )
+    if not isinstance(manifest.get("products"), dict):
+        raise AutomationError("download_manifest", f"products 구조가 올바르지 않음: {path}")
+    return manifest
+
+
+def save_download_manifest(path: Path, manifest: dict) -> None:
+    atomic_write_json(path, manifest)
+
+
+def manifest_downloaded_files(manifest: dict, urls: Sequence[str]) -> dict[str, DownloadedFile]:
+    expected_ids = {product_id(url) for url in urls}
+    run_download_dir = Path(manifest["run_download_dir"]).resolve()
+    completed: dict[str, DownloadedFile] = {}
+    for item_id, record in manifest["products"].items():
+        if item_id not in expected_ids:
+            raise AutomationError(
+                "download_manifest",
+                f"현재 대상이 아닌 상품이 manifest에 있음: {item_id}",
+            )
+        path = Path(record.get("path", "")).resolve()
+        if path.parent != run_download_dir:
+            raise AutomationError(
+                "download_manifest",
+                f"완료 상품 CSV가 실행 디렉터리 밖에 있음: product_id={item_id}",
+            )
+        if not path.is_file() or path.suffix.lower() != ".csv":
+            continue
+        try:
+            validate_download(path)
+        except AutomationError:
+            continue
+        size = path.stat().st_size
+        if size != int(record.get("size", -1)):
+            continue
+        completed[item_id] = DownloadedFile(
+            product_id=item_id,
+            title=str(record.get("title", "")),
+            path=path,
+            size=size,
+        )
+    return completed
+
+
 def configure_logging(log_dir: Path) -> tuple[logging.Logger, Path]:
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -201,6 +280,8 @@ def configure_logging(log_dir: Path) -> tuple[logging.Logger, Path]:
 
     logger = logging.getLogger("bigdata_culture_selenium")
     logger.setLevel(logging.INFO)
+    for handler in logger.handlers:
+        handler.close()
     logger.handlers.clear()
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 
@@ -1168,8 +1249,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     urls = tuple(args.urls or TARGET_URLS)
-    run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    run_download_dir = args.load_only or (args.download_dir / run_stamp)
+    manifest_path = None
+    manifest = None
+    if args.load_only:
+        run_download_dir = args.load_only
+    else:
+        manifest_path = manifest_path_for(args.download_dir, urls)
+        manifest = load_download_manifest(manifest_path, urls)
+        if manifest is None:
+            run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            run_download_dir = args.download_dir / run_stamp
+            manifest = new_download_manifest(urls, run_download_dir)
+            save_download_manifest(manifest_path, manifest)
+        else:
+            run_download_dir = Path(manifest["run_download_dir"])
     logger, log_path = configure_logging(args.log_dir)
     logger.info(
         "stage=run status=START mode=%s products=%s download_dir=%s log=%s",
@@ -1199,23 +1292,44 @@ def main(argv: Sequence[str] | None = None) -> int:
                 len(results),
             )
         else:
-            login_id, password = load_credentials()
-            driver = create_driver(run_download_dir, args.headless)
-            logger.info("stage=chrome_start status=OK headless=%s", args.headless)
-            login(driver, login_id, password, urls[0], logger)
-
-            results = [
-                download_csv_product(
-                    driver=driver,
-                    url=url,
-                    download_dir=run_download_dir,
-                    purpose_code=PURPOSE_CODES[args.purpose],
-                    other_purpose=args.other_purpose,
-                    timeout=args.download_timeout,
-                    logger=logger,
-                )
-                for url in urls
+            completed = manifest_downloaded_files(manifest, urls)
+            pending_urls = [
+                url for url in urls if product_id(url) not in completed
             ]
+            if completed:
+                logger.info(
+                    "stage=download_manifest status=RESUME completed=%s pending=%s",
+                    len(completed),
+                    len(pending_urls),
+                )
+
+            if pending_urls:
+                login_id, password = load_credentials()
+                driver = create_driver(run_download_dir, args.headless)
+                logger.info("stage=chrome_start status=OK headless=%s", args.headless)
+                login(driver, login_id, password, pending_urls[0], logger)
+                for url in pending_urls:
+                    result = download_csv_product(
+                        driver=driver,
+                        url=url,
+                        download_dir=run_download_dir,
+                        purpose_code=PURPOSE_CODES[args.purpose],
+                        other_purpose=args.other_purpose,
+                        timeout=args.download_timeout,
+                        logger=logger,
+                    )
+                    completed[result.product_id] = result
+                    manifest["products"][result.product_id] = {
+                        "title": result.title,
+                        "path": str(result.path),
+                        "size": result.size,
+                        "saved_at": datetime.now().astimezone().isoformat(
+                            timespec="seconds"
+                        ),
+                    }
+                    save_download_manifest(manifest_path, manifest)
+
+            results = [completed[product_id(url)] for url in urls]
             for result in results:
                 print(
                     f"DOWNLOAD_OK product_id={result.product_id} "
@@ -1246,6 +1360,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             database_config,
             logger,
         )
+
+        if manifest_path is not None:
+            manifest_path.unlink()
+            logger.info(
+                "stage=download_manifest status=DELETED file=%s",
+                manifest_path.resolve(),
+            )
 
         for loaded in database_loads:
             print(

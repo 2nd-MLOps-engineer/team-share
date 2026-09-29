@@ -185,142 +185,188 @@ class DQProfileResult:
         return serialize(asdict(self))
 
 
-def render_dq_audit_report(result: DQProfileResult) -> str:
-    """DQ 프로파일을 사람이 읽기 쉬운 감사 보고서로 변환한다."""
+_REMOVAL_REASON_LABELS = {
+    "facility_status_not_normal_operation": "비정상 운영 상태",
+    "facility_invalid_or_missing_korea_coordinates": "좌표 결측/국내 범위 밖",
+    "facility_duplicate_faci_cd": "시설 코드 중복",
+    "weather_warning_duplicate_stn_tmfc_tmseq": "기상특보 중복",
+    "weather_warning_status_superseded_snapshot": "최신 이전 상태 snapshot",
+    "weather_warning_status_no_active_or_preliminary_warning": (
+        "현재/예비 특보 없음"
+    ),
+}
+_REMOVAL_REASON_ORDER = {
+    reason: position
+    for position, reason in enumerate(
+        (
+            "facility_status_not_normal_operation",
+            "facility_invalid_or_missing_korea_coordinates",
+            "facility_duplicate_faci_cd",
+            "weather_warning_duplicate_stn_tmfc_tmseq",
+            "weather_warning_status_superseded_snapshot",
+            "weather_warning_status_no_active_or_preliminary_warning",
+        )
+    )
+}
 
-    row_tracking = result.row_tracking
+
+def render_dq_audit_report(result: DQProfileResult) -> str:
+    """DQ 프로파일의 핵심 결과만 터미널용 감사 보고서로 변환한다."""
+
     rows = result.rows
     nulls = result.nulls
-    dedup = result.dedup
     needs_review = result.needs_review
+    conversion_nulls = nulls.nulls_from_conversion
+    new_nulls = (
+        None
+        if conversion_nulls is None
+        else nulls.nulls_from_normalization + conversion_nulls
+    )
 
     lines = [
         "",
-        "=" * 72,
-        f"[데이터 품질 감사 보고서 / DATA QUALITY AUDIT] {result.dataset}",
-        "=" * 72,
+        "=" * 64,
+        f"DATA QUALITY AUDIT  |  {result.dataset}",
+        "=" * 64,
         "",
-        "1. Validation Summary",
-        "-" * 72,
-        "RULE | EXPECTED | OBSERVED | RESULT",
+        "1. Validation",
+        "-" * 64,
+        _validation_line(
+            "Row lineage",
+            "PASS" if result.row_tracking.passed else "FAIL",
+        ),
+        _validation_line(
+            "Row reconciliation",
+            "PASS" if rows.row_count_matches else "FAIL",
+        ),
+        _validation_line(
+            "Unexplained loss",
+            _human_count_or_unavailable(rows.unexplained_row_loss),
+        ),
+        _validation_line(
+            "New NULLs",
+            _human_count_or_unavailable(new_nulls),
+        ),
+        _validation_line(
+            "Review required",
+            f"{needs_review.rows_needing_review:,}",
+        ),
+        "",
+        "2. Row Transformation",
+        "-" * 64,
+        _metric_line("RAW", rows.raw_rows),
+        _metric_line("PROCESSED", rows.processed_rows),
+        _metric_line("REMOVED", rows.removed_rows),
     ]
 
-    for item in result.validation_summary:
-        expected = _compact_value(item.expected)
-        observed = _compact_value(item.observed)
+    for reason, count in sorted(
+        rows.removal_reasons.items(),
+        key=lambda item: (_REMOVAL_REASON_ORDER.get(item[0], 999), item[0]),
+    ):
         lines.append(
-            f"{item.rule} | {expected} | {observed} | {item.status.value}"
+            _metric_line(
+                f"  - {_removal_reason_label(reason)}",
+                count,
+            )
         )
 
     lines.extend(
         [
+            _metric_line("EXPLAINED", rows.explained_removed_rows),
+            _metric_line("UNEXPLAINED", rows.unexplained_row_loss),
             "",
-            "2. Row Transformation",
-            "-" * 72,
-            f"raw={rows.raw_rows} removed={rows.removed_rows} "
-            f"explained={_display_value(rows.explained_removed_rows)} "
-            f"expected_final={_display_value(rows.expected_final)} "
-            f"actual={rows.actual_final} "
-            f"unexplained={_display_value(rows.unexplained_row_loss)}",
-            "tracking: "
-            f"missing={_display_value(row_tracking.missing_ids)} "
-            f"unknown={_display_value(row_tracking.unknown_ids)} "
-            f"null={row_tracking.null_ids} duplicate={row_tracking.duplicate_ids}",
-            "",
-            "3. Missing Value Profile",
-            "-" * 72,
-            f"source={nulls.source_null} "
-            f"normalization={nulls.nulls_from_normalization} "
-            f"conversion={_display_value(nulls.nulls_from_conversion)} "
-            f"removed-row={_display_value(nulls.removed_row_null)} "
-            f"final={nulls.final_null}",
-            "column                  source normalization conversion removed final",
+            "3. Data Quality Findings",
+            "-" * 64,
         ]
     )
 
-    for column, profile in result.column_profiles.items():
-        source_null = profile.raw.null_count if profile.raw else None
-        final_null = profile.processed.null_count if profile.processed else None
+    findings = _render_dq_findings(result)
+    lines.extend(findings or ["- 중요 발견 없음"])
+
+    lines.extend(
+        [
+            "",
+            "4. Result",
+            "-" * 64,
+            result.status.value,
+            "",
+            f"{rows.removed_rows:,}건이 정제 규칙에 따라 제거되었으며",
+        ]
+    )
+
+    if rows.unexplained_row_loss is None:
+        lines.append("설명되지 않은 데이터 손실은 현재 확인할 수 없습니다.")
+    else:
         lines.append(
-            f"{column:<23.23} {_display_value(source_null):>6} "
-            f"{nulls.normalization_by_column.get(column, 0):>13} "
-            f"{nulls.conversion_by_column.get(column, 0):>10} "
-            f"{_display_value(nulls.removed_row_null_by_column.get(column)):>7} "
-            f"{_display_value(final_null):>5}"
+            "설명되지 않은 데이터 손실은 "
+            f"{rows.unexplained_row_loss:,}건입니다."
         )
 
-    lines.extend(
-        [
-            "",
-            "4. Column Profile RAW <-> PROCESSED (Observation)",
-            "-" * 72,
-        ]
-    )
+    if result.status == DQAuditStatus.CHECK_FAILED:
+        lines.append("행 lineage 또는 reconciliation 결과를 확인해야 합니다.")
 
-    for column, profile in result.column_profiles.items():
-        lines.append(f"[{column}]")
-        lines.append(f"  RAW       {_format_column_statistics(profile.raw)}")
-        lines.append(f"  PROCESSED {_format_column_statistics(profile.processed)}")
-
-    lines.extend(
-        [
-            "",
-            "5. Duplicate / Needs Review / Issues",
-            "-" * 72,
-            "duplicate: "
-            f"keys={list(dedup.key_columns) or 'N/A'} "
-            f"groups={_display_value(dedup.duplicate_groups)} "
-            f"rows={_display_value(dedup.duplicate_rows)} "
-            f"removed={_display_value(dedup.removed_rows)} "
-            f"identical={_display_value(dedup.identical_payload_groups)} "
-            f"conflicting={_display_value(dedup.conflicting_payload_groups)}",
-            f"needs_review: rows={needs_review.rows_needing_review} "
-            f"reasons={needs_review.review_reasons or '없음'}",
-            "issues:",
-        ]
-    )
-
-    if result.issues:
-        for issue in result.issues:
-            lines.append(f"  - {issue}")
-    else:
-        lines.append("  없음")
-
-    lines.extend(
-        [
-            "",
-            "",
-            "-" * 72,
-            "감사 결과 (Audit Result)",
-            "",
-        ]
-    )
-
-    if result.status == DQAuditStatus.CHECK_PASSED:
-        lines.extend(
-            [
-                "CHECK_PASSED - 통과",
-                "",
-                "행 추적 및 행 수 정합성에 이상이 발견되지 않았습니다.",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "CHECK_FAILED - 확인 필요",
-                "",
-                "행 추적 또는 행 수 변화에서 확인이 필요한 문제가 발견되었습니다.",
-                "위의 행 무결성 및 발견된 문제 항목을 확인하세요.",
-            ]
-        )
-
-    lines.append("=" * 72)
-
+    lines.append("=" * 64)
     return "\n".join(lines)
 
 
 def _display_value(value: object) -> str:
     return "N/A" if value is None else str(value)
+
+
+def _human_count(value: int | None) -> str:
+    return "N/A" if value is None else f"{value:,}"
+
+
+def _human_count_or_unavailable(value: int | None) -> str:
+    return "확인 불가" if value is None else f"{value:,}"
+
+
+def _validation_line(label: str, value: str) -> str:
+    return f"- {label:<24} {value:>12}"
+
+
+def _metric_line(label: str, value: int | None) -> str:
+    return f"{label:<34} {_human_count_or_unavailable(value):>12}"
+
+
+def _removal_reason_label(reason: str) -> str:
+    return _REMOVAL_REASON_LABELS.get(reason, reason.replace("_", " "))
+
+
+def _render_dq_findings(result: DQProfileResult) -> list[str]:
+    nulls = result.nulls
+    needs_review = result.needs_review
+    conversion_columns = sorted(
+        column
+        for column, count in nulls.conversion_by_column.items()
+        if count
+    )
+    conversion_label = "Conversion NULL"
+    if conversion_columns:
+        conversion_label += f" ({', '.join(conversion_columns)})"
+
+    lines = [
+        _metric_line("Normalization NULL", nulls.nulls_from_normalization),
+        _metric_line(conversion_label, nulls.nulls_from_conversion),
+        _metric_line("Review required", needs_review.rows_needing_review),
+    ]
+
+    failed_rules = [
+        item.rule
+        for item in result.validation_summary
+        if item.status == ValidationStatus.FAIL
+    ]
+    audit_findings = [
+        *(f"검증 실패: {rule}" for rule in failed_rules),
+        *result.issues,
+    ]
+    if audit_findings:
+        lines.append("Issues")
+        lines.extend(f"- {finding}" for finding in dict.fromkeys(audit_findings))
+    else:
+        lines.append(f"{'Issues':<34} {'없음':>12}")
+
+    return lines
 
 
 def _compact_value(value: object) -> str:
@@ -586,8 +632,31 @@ class ConversionLossCollector:
         )
 
 
+class RemovalReasonCollector:
+    """Collect lineage IDs removed by explicit processor rules."""
+
+    def __init__(self) -> None:
+        self.reasons: dict[str, set[object]] = {}
+        self.issues: list[str] = []
+
+    def record(self, frame: pd.DataFrame, reason: str) -> None:
+        if frame.empty:
+            return
+        if DQ_LINEAGE_COLUMN not in frame.columns:
+            self.issues.append(
+                f"removal reason '{reason}' was recorded without _dq_row_id"
+            )
+            return
+
+        row_ids = frame[DQ_LINEAGE_COLUMN].dropna().tolist()
+        self.reasons.setdefault(reason, set()).update(row_ids)
+
+
 _ACTIVE_CONVERSION_COLLECTOR: ContextVar[ConversionLossCollector | None] = (
     ContextVar("dq_conversion_loss_collector", default=None)
+)
+_ACTIVE_REMOVAL_COLLECTOR: ContextVar[RemovalReasonCollector | None] = (
+    ContextVar("dq_removal_reason_collector", default=None)
 )
 
 
@@ -598,6 +667,23 @@ def collect_conversion_losses(collector: ConversionLossCollector):
         yield collector
     finally:
         _ACTIVE_CONVERSION_COLLECTOR.reset(token)
+
+
+@contextmanager
+def collect_removal_reasons(collector: RemovalReasonCollector):
+    token = _ACTIVE_REMOVAL_COLLECTOR.set(collector)
+    try:
+        yield collector
+    finally:
+        _ACTIVE_REMOVAL_COLLECTOR.reset(token)
+
+
+def record_removal_reason(frame: pd.DataFrame, reason: str) -> None:
+    """Record removed rows when a profiled processor run is active."""
+
+    collector = _ACTIVE_REMOVAL_COLLECTOR.get()
+    if collector is not None:
+        collector.record(frame, reason)
 
 
 def record_conversion_step(
@@ -974,19 +1060,33 @@ def profile_processor_run(
     normalized = normalizer(lineaged_raw)
     normalization = calculate_null_transitions(lineaged_raw, normalized)
     conversion_collector = ConversionLossCollector()
+    removal_collector = RemovalReasonCollector()
 
-    with collect_conversion_losses(conversion_collector):
+    with (
+        collect_conversion_losses(conversion_collector),
+        collect_removal_reasons(removal_collector),
+    ):
         processed_with_lineage = processor(lineaged_raw)
+
+    combined_removal_reasons = {
+        reason: set(row_ids)
+        for reason, row_ids in (removal_reasons or {}).items()
+    }
+    for reason, row_ids in removal_collector.reasons.items():
+        combined_removal_reasons.setdefault(reason, set()).update(row_ids)
 
     row_tracking = audit_lineage(lineaged_raw, processed_with_lineage)
     rows = reconcile_row_counts(
         lineaged_raw,
         processed_with_lineage,
-        removal_reasons=removal_reasons,
+        removal_reasons=combined_removal_reasons,
     )
     conversion = conversion_collector.metrics()
     conversion_available = not conversion_collector.issues
-    issues = list(conversion_collector.issues)
+    issues = [
+        *conversion_collector.issues,
+        *removal_collector.issues,
+    ]
 
     if not row_tracking.available:
         issues.append("processor output did not preserve _dq_row_id")
