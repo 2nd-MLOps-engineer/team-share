@@ -1,8 +1,9 @@
-"""Copy the approved local pipeline snapshot into isolated Supabase schemas.
+"""로컬 파이프라인 데이터를 Supabase의 m3_* 스키마로 복사합니다.
 
-Run without arguments for a read-only plan. --execute creates only m3_* objects.
-Credentials come from collector/.env and are never logged.
+기본 실행은 변경 계획만 확인하며, --execute 옵션 사용 시 실제 반영합니다.
 """
+
+
 from __future__ import annotations
 
 import argparse

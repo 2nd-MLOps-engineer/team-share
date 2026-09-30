@@ -1,3 +1,5 @@
+"""파이프라인 실행 이력과 상태를 monitoring.pipeline_run_history에 기록합니다."""
+
 from __future__ import annotations
 
 import json

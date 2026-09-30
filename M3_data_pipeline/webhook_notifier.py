@@ -14,7 +14,7 @@ DEFAULT_TIMEOUT_SECONDS = 10
 
 
 def _get_webhook_url() -> str | None:
-    """Discord Webhook URL???�경변?�에???�는??"""
+    """Discord Webhook URL을 환경변수에서 읽고, 미설정이면 None을 반환한다."""
     url = os.getenv("DISCORD_WEBHOOK_URL")
 
     if not url:
@@ -31,12 +31,9 @@ def send_discord_message(
     *,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> bool:
-    """
-    Discord Webhook 메시지�??�송?�다.
+    """Discord Webhook 메시지를 전송하고 성공 여부를 반환한다.
 
-    Webhook ?�송 ?�패가 ?�이???�이?�라???�체�?
-    ?�패?�키지 ?�도�??�외�??��?�??�파?��? ?�는??
-    """
+    URL 미설정 또는 requests.RequestException이면 False를 반환한다."""
     webhook_url = _get_webhook_url()
 
     if webhook_url is None:
@@ -65,30 +62,30 @@ def send_discord_message(
 
 
 def _format_duration(seconds: float | None) -> str:
-    """�??�위 ?�행 ?�간???�람???�기 ?�운 ?�태�?변?�한??"""
+    """초 단위 시간을 반올림한 뒤 시·분·초로 표시한다. None은 확인 불가로 표시한다."""
     if seconds is None:
-        return "?�인 불�?"
+        return "확인 불가"
 
     total_seconds = max(0, int(round(seconds)))
     minutes, secs = divmod(total_seconds, 60)
     hours, minutes = divmod(minutes, 60)
 
     if hours:
-        return f"{hours}?�간 {minutes}�?{secs}�?
+        return f"{hours}시간 {minutes}분 {secs}초"
     if minutes:
-        return f"{minutes}�?{secs}�?
-    return f"{secs}�?
+        return f"{minutes}분 {secs}초"
+    return f"{secs}초"
 
 
 def _stage_label(stage: str | None) -> str:
-    """?��? stage ?�름???�영?�용 ?�현?�로 변?�한??"""
+    """실행 단계 코드를 알림용 이름으로 변환한다."""
     labels = {
-        "collect": "?�이???�집",
-        "load": "DB ?�재 �??�제",
-        "dq": "?�이???�질 검??,
-        "monitoring": "?�영 기록",
+        "collect": "데이터 수집",
+        "load": "DB 적재 및 정제",
+        "dq": "데이터 품질 검사",
+        "monitoring": "운영 기록",
     }
-    return labels.get(stage or "", stage or "?�인 ?�요")
+    return labels.get(stage or "", stage or "확인 필요")
 
 
 def send_pipeline_failure_alert(
@@ -99,20 +96,20 @@ def send_pipeline_failure_alert(
     error: BaseException,
     elapsed_seconds: float,
 ) -> bool:
-    """?�이?�라???�행 ?�패�??�영?�용 메시지�??�송?�다."""
+    """작업·실패 단계·실행시간·run_id를 전송한다. error 내용은 메시지에 포함하지 않는다."""
 
     stage_text = _stage_label(failure_stage)
 
     message = (
-        "?�� **?�심?�까 ?�이???�이?�라???�패**\n\n"
-        f"**?�업**  `{job_id}`\n"
-        f"**?�계**  {stage_text}\n"
-        "**?�태**  ?�패\n\n"
-        "?�️ **?�인 ?�요**\n"
-        f"`{job_id}` ?�업???�상?�으�??�료?��? 못했?�니??\n"
-        "?�세 ?�인?� pipeline/error 로그?�서 ?�인?????�습?�다.\n\n"
-        f"??**?�요?�간**  {_format_duration(elapsed_seconds)}\n"
-        f"?�� **Run ID**  `{run_id}`"
+        "🚨 **우심운까 데이터 파이프라인 실패**\n\n"
+        f"**작업**  `{job_id}`\n"
+        f"**단계**  {stage_text}\n"
+        "**상태**  실패\n\n"
+        "⚠️ **확인 필요**\n"
+        f"`{job_id}` 작업이 정상적으로 완료되지 못했습니다.\n"
+        "상세 원인은 pipeline/error 로그에서 확인할 수 있습니다.\n\n"
+        f"⏱ **소요시간**  {_format_duration(elapsed_seconds)}\n"
+        f"🔎 **Run ID**  `{run_id}`"
     )
 
     return send_discord_message(message)
@@ -126,7 +123,7 @@ def send_dq_failure_alert(
     dq_results: Mapping[str, Any],
     elapsed_seconds: float,
 ) -> bool:
-    """?�이???�질 검???�패�??�영?�용 메시지�??�송?�다."""
+    """CHECK_FAILED인 테이블과 작업의 DQ 상태를 알림으로 전송한다."""
 
     failed_datasets = [
         dataset
@@ -142,19 +139,19 @@ def send_dq_failure_alert(
     dataset_text = (
         ", ".join(f"`{dataset}`" for dataset in failed_datasets)
         if failed_datasets
-        else "?�인 ?�요"
+        else "확인 필요"
     )
 
     message = (
-        "?�️ **?�심?�까 ?�이???�질 ?�상 감�?**\n\n"
-        f"**?�업**  `{job_id}`\n"
-        f"**?�태**  `{dq_status}`\n"
-        f"**?�???�이??*  {dataset_text}\n\n"
-        "?�� **?�인 ?�요**\n"
-        "?�이???�질 검?�에??기�????�과?��? 못한 ??��??발견?�었?�니??\n"
-        "?�세 DQ 결과??monitoring �?DQ 로그?�서 ?�인?????�습?�다.\n\n"
-        f"??**?�요?�간**  {_format_duration(elapsed_seconds)}\n"
-        f"?�� **Run ID**  `{run_id}`"
+        "⚠️ **우심운까 데이터 품질 이상 감지**\n\n"
+        f"**작업**  `{job_id}`\n"
+        f"**상태**  `{dq_status}`\n"
+        f"**대상 테이블**  {dataset_text}\n\n"
+        "🔎 **확인 필요**\n"
+        "데이터 품질 검사에서 기준을 통과하지 못한 항목이 발견되었습니다.\n"
+        "상세 DQ 결과는 monitoring 및 DQ 로그에서 확인할 수 있습니다.\n\n"
+        f"⏱ **소요시간**  {_format_duration(elapsed_seconds)}\n"
+        f"🔎 **Run ID**  `{run_id}`"
     )
 
     return send_discord_message(message)
@@ -178,20 +175,20 @@ def send_operations_summary(
     dq_failed_datasets: list[str],
     max_duration_job: str | None,
 ) -> bool:
-    """?�기 ?�영 ?�황???�영?�용 메시지�??�송?�다."""
+    """실행·DQ 집계와 경고/실패 작업 목록을 운영 요약 메시지로 전송한다."""
 
-    # ?�단 ?�태 ?�약
+    # 상단 상태 요약
     if failed_runs or warning_runs or dq_failed:
         status_text = (
-            "?�️ **?�인???�요????��???�습?�다.**\n"
-            f"?�패 {failed_runs}�?· "
-            f"경고 {warning_runs}�?· "
-            f"DQ ?�패 {dq_failed}�?
+            "⚠️ **확인이 필요한 항목이 있습니다.**\n"
+            f"실패 {failed_runs}건 · "
+            f"경고 {warning_runs}건 · "
+            f"DQ 실패 {dq_failed}건"
         )
     else:
-        status_text = "??**?�재 ?�인???�요???�상 ??��???�습?�다.**"
+        status_text = "✅ **현재 확인이 필요한 이상 항목이 없습니다.**"
 
-    # ?�단 조치 ?�역
+    # 하단 조치 목록
     action_lines: list[str] = []
 
     if failed_jobs:
@@ -199,13 +196,12 @@ def send_operations_summary(
             f"`{job}`" for job in failed_jobs
         )
         action_lines.extend([
-            "?�� **?�패 ?�업**",
+            "🚨 **실패 작업**",
             failed_job_text,
-            "???�패 ?�인 ?�인 ???�실???��? 결정",
+            "→ 실패 원인 확인 후 재실행 여부 결정",
         ])
 
-    # ?�재??warning job ?�름???�달받�? ?�으므�?
-    # 건수�??�시?�고 구체 ?�?��? ?�시?��? ?�는??
+    # 전달받은 warning_jobs의 작업 이름과 확인 안내를 표시한다.
     if warning_jobs:
         if action_lines:
             action_lines.append("")
@@ -215,9 +211,9 @@ def send_operations_summary(
         )
 
         action_lines.extend([
-            "?�️ **경고 ?�업**",
+            "⚠️ **경고 작업**",
             warning_job_text,
-            "??경고 ?�용 ?�인",
+            "→ 경고 내용 확인",
         ])
 
     if dq_failed_datasets:
@@ -228,35 +224,35 @@ def send_operations_summary(
             f"`{dataset}`" for dataset in dq_failed_datasets
         )
         action_lines.extend([
-            "?�� **DQ ?�패**",
+            "🔎 **DQ 실패**",
             dq_failed_text,
-            "???�패 ??���??�향 범위 ?�인",
+            "→ 실패 항목과 영향 범위 확인",
         ])
 
     if action_lines:
         action_text = "\n".join(action_lines)
     else:
-        action_text = "??**추�? 조치 ?�요 ?�음**"
+        action_text = "✅ **추가 조치 필요 없음**"
 
     message = (
-        f"?�� **?�심?�까 ?�영 ?�황 · {period_label}**\n"
-        f"`{period_start}` ??`{period_end}`\n\n"
+        f"📊 **우심운까 운영 현황 · {period_label}**\n"
+        f"`{period_start}` → `{period_end}`\n\n"
 
         f"{status_text}\n\n"
 
-        "?�� **?�행 ?�황**\n"
-        f"?�체 `{total_runs}`  ·  "
-        f"?�상 `{success_runs}`  ·  "
+        "📌 **실행 현황**\n"
+        f"전체 `{total_runs}`  ·  "
+        f"정상 `{success_runs}`  ·  "
         f"경고 `{warning_runs}`  ·  "
-        f"?�패 `{failed_runs}`\n\n"
+        f"실패 `{failed_runs}`\n\n"
 
-        "?�� **?�이???�질**\n"
-        f"검???�과 `{dq_passed}`  ·  "
-        f"?�패 `{dq_failed}`\n\n"
+        "🔎 **데이터 품질**\n"
+        f"검사 통과 `{dq_passed}`  ·  "
+        f"실패 `{dq_failed}`\n\n"
 
-        "??**?�행?�간**\n"
-        f"?�균 `{_format_duration(avg_duration_seconds)}`\n"
-        f"최�? `{_format_duration(max_duration_seconds)}`"
+        "⏱ **실행시간**\n"
+        f"평균 `{_format_duration(avg_duration_seconds)}`\n"
+        f"최대 `{_format_duration(max_duration_seconds)}`"
         f"{f' · `{max_duration_job}`' if max_duration_job else ''}\n\n"
 
         f"{action_text}"

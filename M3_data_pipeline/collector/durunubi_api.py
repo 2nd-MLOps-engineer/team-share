@@ -20,7 +20,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 ENV_PATH = CURRENT_DIR / ".env"
 
-# 9/27 csv관련 상수삭제
 
 # ============================================================
 # 2. ENV

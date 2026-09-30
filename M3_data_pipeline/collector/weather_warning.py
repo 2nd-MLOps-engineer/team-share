@@ -347,7 +347,7 @@ def collect_warning_list():
 
 
 # ============================================================
-# 11. LIST LOCAL RAW 누적
+# 11. 기존 RAW DB 목록과 신규 수집분 병합
 # ============================================================
 
 def merge_warning_raw(old_df, new_df):
@@ -474,7 +474,7 @@ def collect_warning_status():
 
 
 # ============================================================
-# 15. STATUS LOCAL RAW 누적
+# 13. 전달받은 현재 특보현황의 중복 제거(과거 상태와 병합하지 않음)
 # ============================================================
 
 def deduplicate_status(new_df):
@@ -555,7 +555,7 @@ STATUS_RAW_COLUMNS = [
 
 
 def build_status_current_raw(status_df):
-    """Generic processor가 읽을 현재 상태 API snapshot을 원자 저장한다."""
+    """공통 processor용 현재 상태 RAW DataFrame을 반환한다(필수 컬럼 보완)."""
 
     if status_df.empty:
         snapshot = pd.DataFrame(columns=STATUS_RAW_COLUMNS)
@@ -569,7 +569,7 @@ def build_status_current_raw(status_df):
 
 
 def build_warning_raw(warning_new_df):
-    """기존 목록 snapshot과 신규 6일 조회분을 병합한다."""
+    """기존 RAW DB 목록과 설정된 조회기간의 신규 수집분을 병합한다."""
 
     old_df = read_raw_table_if_exists("weather_warning")
     if warning_new_df.empty:

@@ -60,7 +60,7 @@ URL = (
 NUM_OF_ROWS = 1000
 DAILY_LIMIT = 10000
 
-# 페이지별 최대 재시도 횟수
+# 페이지별 최대 요청 시도 횟수(최초 요청 포함)
 MAX_RETRIES = 3
 
 # 재시도 간격(초)
@@ -97,7 +97,8 @@ def format_time(seconds):
 def fetch_page(page_no):
     """
     API 한 페이지를 요청한다.
-    실패하면 최대 MAX_RETRIES회까지 재시도한다.
+    최초 요청을 포함해 최대 MAX_RETRIES회 시도한다.
+    성공하면 (body, items), 모든 시도가 실패하면 (None, None)을 반환한다.
     """
 
     params = {
@@ -152,7 +153,7 @@ def fetch_page(page_no):
                 )
                 time.sleep(RETRY_DELAY)
 
-    # 모든 재시도 실패
+    # 모든 요청 시도 실패
     return None, None
 
 

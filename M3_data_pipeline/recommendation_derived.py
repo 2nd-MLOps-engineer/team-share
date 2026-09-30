@@ -1,4 +1,5 @@
-"""Local PostgreSQL derived snapshot and read-only recommendation bridge."""
+"""추천에 사용할 파생 데이터를 생성하고 조회 기능을 제공합니다."""
+
 from datetime import datetime
 import hashlib
 import json

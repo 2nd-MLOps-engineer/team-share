@@ -7,13 +7,16 @@ M3 데이터 통합 파이프라인 스케줄러.
 주요 역할:
 1. 데이터셋별 collector를 지정된 주기에 실행한다.
 2. 타임아웃, 연결 오류 등 일시적인 수집 오류에 한해서만 제한적으로 재시도한다.
-3. 수집된 원본 데이터를 RAW 영역에 저장한다.
+3. collector가 수집 원본을 RAW DB에 적재한다.
 4. 원본 데이터를 dataset_processors.py의 데이터셋별 정제 과정을 거쳐
    PROCESSED 영역에 저장한다.
 5. --load-existing 실행 시 기존 RAW DB 데이터를 재사용한다.
-6. 한 작업이 실패해도 다른 데이터셋 작업은 독립적으로 계속 실행한다.
+6. 예약 작업은 독립 실행하며, --run-all-once는 실패해도 같은 phase를 계속한다.
+   선행 phase에 실패가 있으면 run_last phase는 건너뛴다.
 7. 실행 시작·성공·실패·재시도 상태를 로그로 남긴다.
 8. single/multi-table 데이터셋을 같은 RAW DB 기반 metadata 계약으로 처리한다.
+9. 실행 이력 기록과 실패/DQ 알림, 정기 운영 요약 전송을 수행한다.
+   DQ CHECK_FAILED만으로 적재를 차단하지 않고 WARNING으로 기록한다.
 
 --run-all-once는 metadata의 실행 phase/run_order 순서대로 직렬 실행된다.
 run_last dataset은 앞선 phase가 모두 성공한 뒤 마지막에 실행된다.
@@ -93,7 +96,7 @@ PIPELINE_DIR = Path(__file__).resolve().parent
 
 
 class CollectionStageError(RuntimeError):
-    """재시도해도 해결되지 않는 collector 실행 실패."""
+    """collector 실행 실패의 기본 예외. 일시적 오류는 하위 예외로 구분한다."""
 
 
 class TransientCollectionError(CollectionStageError):
@@ -104,7 +107,7 @@ JOB_SPECS: dict[str, DatasetSpec] = dict(get_dataset_specs())
 
 
 def _run_all_once_phases() -> tuple[tuple[str, ...], ...]:
-    """현재는 직렬 실행하고, 향후 bounded executor가 사용할 phase를 반환한다."""
+    """run_order 순서의 일반 작업 phase와 run_last 작업 phase를 반환한다."""
 
     ordered = sorted(
         JOB_SPECS,
@@ -253,7 +256,10 @@ def run_job(
     skip_db: bool = False,
     load_existing: bool = False,
 ) -> None:
-    """수집 오류만 재시도하고 collector가 적재한 RAW를 공통 ELT로 처리한다."""
+    """일시적 수집 오류만 재시도하고 collector가 적재한 RAW를 공통 ELT로 처리한다.
+
+    load_existing은 수집을 생략한다. skip_db는 공통 정제·PROCESSED 적재와
+    성공 이력 기록을 생략하며, collector 자체의 RAW DB 적재는 수행된다."""
 
     if job_id not in JOB_SPECS:
         raise KeyError(f"알 수 없는 job: {job_id}")
@@ -446,7 +452,7 @@ def send_scheduled_operations_summary() -> None:
     """09:15 / 17:00 KST 기준 파이프라인 운영 현황을 Discord로 전송한다."""
     load_environment()
 
-    now = datetime.now(TIMEZONE)
+    now = datetime.now(TIMEZONE).astimezone(TIMEZONE)
 
     if now.hour == 9 and now.minute == 15:
         period_end = now.replace(
@@ -462,7 +468,7 @@ def send_scheduled_operations_summary() -> None:
             minute=0,
         )
 
-        period_label = "주간 운영 결과"
+        period_label = "운영 결과 · 야간"
 
     elif now.hour == 17:
         period_end = now.replace(
@@ -475,8 +481,7 @@ def send_scheduled_operations_summary() -> None:
             hour=9,
             minute=15,
         )
-
-        period_label = "운영 결과 · 야간"
+        period_label = "운영 결과 · 주간"
 
     else:
         LOGGER.warning(

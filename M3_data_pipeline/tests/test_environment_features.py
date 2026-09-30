@@ -1,4 +1,5 @@
-"""Processed fixtures and mocked SELECTs only; no DB/API calls."""
+"""정제된 테스트 fixture와 mock SELECT를 사용하며, 실제 DB/API는 호출하지 않습니다."""
+
 from datetime import datetime, timedelta
 from pathlib import Path
 import copy

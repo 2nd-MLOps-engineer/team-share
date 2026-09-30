@@ -21,7 +21,7 @@ from pipeline_elt import upsert_raw_dataset_group
 # ==================================================
 
 # 현재 파일:
-# team-share/M3_data_pipeline/collector/collect_weather.py
+# team-share/M3_data_pipeline/collector/weather.py
 #
 # parents[2] = team-share
 
@@ -110,9 +110,9 @@ FCST_URL = (
 
 
 # ==================================================
-# 6. 테스트 지역
+# 6. 수집 대상 격자
 #
-# 우선 서울 격자 한 곳으로 테스트
+# 서울 격자 한 곳의 초단기실황/예보를 수집
 # nx = 60
 # ny = 127
 # ==================================================
