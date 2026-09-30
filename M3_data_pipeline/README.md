@@ -16,7 +16,7 @@ PostgreSQL RAW ───────────────────┐
         ↓                         │
 Selenium 크롤링                    │
         ↓                         │
-다운로드 CSV → PostgreSQL COPY  ───┘
+CSV 다운로드 시 PostgreSQL COPY  ───┘
                             ↓
                  Cleaning / Transformation
                             ↓
@@ -36,7 +36,7 @@ Pipeline Execution
 | `raw` | 수집한 원천 데이터 보존 |
 | `processed` | 정제된 데이터 |
 | `monitoring` | 파이프라인 실행 및 품질검사 이력 |
-| `derived` | 향후 서비스에 활용할 파생변수 저장 영역 |
+| `derived` | 서비스에 활용할 파생변수 저장 영역 |
 ---
 2. 데이터 수집 자동화
 2.1 공공데이터 API 수집
@@ -381,4 +381,4 @@ Audit
 13. Next Steps
 - 데이터셋별 DQ 기준 고도화
 - 신규 데이터셋 수집기 생성 이후 공통 ELT·DQ·스케줄 연결 자동화
-- 서비스에 활용할 파생변수 생성
+- 서비스에 활용할 파생변수 검증 및 추천 서비스 활용 고도화
