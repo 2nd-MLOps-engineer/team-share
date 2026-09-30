@@ -1,15 +1,16 @@
 """
 수집 데이터를 PostgreSQL RAW/PROCESSED 계층으로 관리하는 공통 ELT 파이프라인 모듈.
 
-RAW(Bronze)에는 수집 원본을 보존하고,
+RAW에는 수집 원본을 보존하고,
 dataset_processors.py의 데이터셋별 정제 함수를 통해
-PROCESSED(Silver) 데이터를 생성한다.
+PROCESSED 데이터를 생성한다.
 
 처리 경로:
 
 1. RAW DB 기반 데이터
    - 이미 PostgreSQL raw 스키마에 적재된 데이터를 읽는다.
-   - dataset_processors.py의 데이터셋별 정제 함수를 실행한다.
+   - dataset_processors.py의 정제 함수를 실행하고 비차단 DQ 감사를 수행한다.
+   - 선언된 데이터셋 관계 검증을 수행한다.
    - PROCESSED 데이터를 staging 테이블에 먼저 저장한다.
    - staging 테이블의 행 수를 검증한다.
    - 검증에 성공하면 metadata 정책에 따라 PROCESSED를 교체하거나 시계열 upsert한다.
@@ -116,7 +117,7 @@ def _timed_dataset_stage(
     stage: str,
     durations: dict[str, float],
 ) -> Iterator[None]:
-    """단계별 구조화 로그를 남기고 향후 audit hook의 경계를 제공한다."""
+    """단계별 시작·성공·실패를 로그에 남기고 durations에 소요시간을 기록한다."""
 
     started = time.monotonic()
     LOGGER.info(
@@ -247,7 +248,7 @@ def _make_staging_identifier(
 ) -> str:
     """
     PostgreSQL identifier 제한 63자 보다 여유 있게
-    staging 테이블명을 생성한다(55자).
+    staging 테이블명을 생성한다(최대 55자).
 
     형식:
         stg_<table 일부>_<stage>_<uuid8>
@@ -911,7 +912,9 @@ def load_dataset_from_raw(
     dict[str, tuple[int, int]],
     dict[str, DQProfileResult],
 ]:
-    """RAW 전체에 기존 DQ를 수행하고 metadata의 PROCESSED 적재 정책을 적용한다."""
+    """데이터셋의 RAW 테이블 전체를 정제·DQ 감사하고 PROCESSED 적재 정책을 적용한다.
+
+    테이블별 (PROCESSED 행 수, NULL 셀 수) 매핑과 DQ 결과 매핑을 반환한다."""
 
     if spec.source_kind is not SourceKind.RAW_DATABASE:
         raise ValueError(f"{spec.name}: RAW_DATABASE dataset이 아닙니다.")

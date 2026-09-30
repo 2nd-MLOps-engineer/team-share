@@ -1,8 +1,6 @@
-"""Declarative metadata for the M3 data pipeline.
+"""데이터셋별 정제 규칙과 파이프라인 메타데이터를 정의합니다.
 
-This module intentionally contains no collection, processing, DQ, or database
-loading code.  A future collector discovery/schema profiling implementation only
-needs to provide the same ``MetadataProvider`` interface.
+실행 로직은 포함하지 않습니다.
 """
 
 from __future__ import annotations

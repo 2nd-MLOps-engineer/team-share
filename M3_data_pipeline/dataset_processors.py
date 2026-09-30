@@ -1,4 +1,4 @@
-"""데이터셋별 processed(Silver) 정제 규칙.
+"""데이터셋별 PROCESSED 정제 규칙.
 
 원칙
 ----
@@ -29,19 +29,20 @@
 
 11. 전용 processor가 없는 신규 데이터셋은 임의 정제하지 않는다.
     UnregisteredDatasetError를 발생시켜 해당 데이터셋의
-    processed(Silver) 적재를 차단한다.
+    PROCESSED 적재를 차단한다.
 
 12. 등록된 processor의 정제 과정에서 오류가 발생하면
     DatasetProcessorError로 처리하여 불완전한 processed 적재를 차단한다.
 
-13. 정제 결과가 0건이면 EmptyProcessedDatasetError를 발생시켜
-    빈 데이터가 기존 processed 테이블을 덮어쓰지 않도록 한다.
+13. allow_empty=False일 때 정제 결과가 0건이면
+    EmptyProcessedDatasetError를 발생시켜 기존 processed를 보호한다.
+    allow_empty=True라도 유효 컬럼이 없는 결과는 허용하지 않는다.
 
 14. processor에서 발생한 예외는 상위 scheduler/orchestrator로 전달한다.
-    scheduler/orchestrator는 dataset 단위로 예외를 처리하여
-    실패한 데이터셋만 건너뛰고 다른 등록 데이터셋의 처리는 계속한다.
+    예약 작업은 독립 실행하며, --run-all-once는 같은 phase의 작업을 계속한다.
+    선행 phase에 실패가 있으면 run_last phase는 실행하지 않는다.
 
-15. 모든 processor 실행 결과는 RAW 건수, PROCESSED 건수,
+15. 공통 진입점 process_dataset의 정제 성공 시 RAW 건수, PROCESSED 건수,
     제거 건수/비율, NULL 개수, needs_review 건수(해당 시),
     정제시간을 출력하여 정제 결과를 확인할 수 있도록 한다.
 
@@ -2246,7 +2247,7 @@ PROCESSORS: dict[
     str,
     Callable[[pd.DataFrame], pd.DataFrame],
 ] = {
-    # 일반 API / CSV
+    # 일반 API 수집 데이터
     "air_quality":
         process_air_quality,
 
@@ -2321,7 +2322,7 @@ def process_dataset(
     allow_empty: bool = False,
 ) -> pd.DataFrame:
     """
-    등록된 테이블의 Silver processor를 실행한다.
+    등록된 테이블의 PROCESSED 정제 함수를 실행한다.
 
     미등록 데이터셋:
         해당 데이터셋의 processed 적재를 차단한다.
@@ -2330,14 +2331,15 @@ def process_dataset(
         전용 processor를 끝까지 실행한다.
 
     processor 내부 오류:
-        DatasetProcessorError로 감싸서
-        상위 orchestration 계층에 전달한다.
+        DatasetProcessorError는 그대로 전달하고, 그 외 예외는
+        DatasetProcessorError로 감싸서 상위 orchestration 계층에 전달한다.
 
     정제 결과 0건:
-        기존 processed 보호를 위해 실패 처리한다.
+        allow_empty=False이면 기존 processed 보호를 위해 실패 처리한다.
+        allow_empty=True이면 컬럼 정의가 있는 빈 DataFrame을 허용한다.
 
     정제 완료 후:
-        RAW와 PROCESSED에서 모두 100% 결측인 컬럼은
+        결과가 비어 있지 않을 때 RAW와 PROCESSED에서 모두 100% 결측인 컬럼은
         PROCESSED에서만 제거한다.
 
         RAW/PROCESSED 행 수, 결측률, 행 제거율,

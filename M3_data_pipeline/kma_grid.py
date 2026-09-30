@@ -1,14 +1,9 @@
-"""Pure geographic latitude/longitude -> KMA DFS 5 km API grid (1-based).
+"""위도·경도 좌표를 기상청 단기예보 API의 격자 좌표(nx, ny)로 변환합니다.
 
-Same nx/ny system used by VilageFcstInfoService_2.0 getUltraSrtNcst/Fcst.
-KMA specification (2024-03-05):
-https://apihub.kma.go.kr/getAttachFile.do?fileName=%2820240305%29%EB%8F%99%EB%84%A4%EC%98%88%EB%B3%B4+%EA%B2%A9%EC%9E%90%EC%98%81%EC%97%AD+%EC%A0%95%EB%B3%B4.pdf
-
-Spherical Lambert conformal conic, R=6371.00877 km, spacing=5 km,
-standard parallels 30/60N, origin 38N/126E at API grid (43, 136).
-Nearest grid point uses floor(value + 0.5), not Python's bankers rounding.
-No network, DB, collector imports, or source-row mutation.
+기상청 단기예보 격자 사양을 기준으로 5 km 격자 좌표를 계산합니다.
 """
+
+
 import math
 
 

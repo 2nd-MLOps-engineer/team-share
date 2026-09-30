@@ -1,4 +1,8 @@
-"""Offline policy tests: SQL is recorded/emulated, never sent to a database."""
+"""시계열 데이터의 누적 적재 동작을 검증합니다.
+
+SQL은 테스트 환경에서 모의 실행하며 실제 데이터베이스에는 연결하지 않습니다.
+"""
+
 import copy
 import re
 import sys

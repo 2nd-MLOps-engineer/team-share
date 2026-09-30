@@ -8,9 +8,9 @@ RAW 데이터가 processor를 거쳐 PROCESSED 데이터로 변환되는 동안
 행 추적, 행 수 변화, NULL 변화, 중복, 검토가 필요한 행 등의
 품질 지표를 측정하고 그 결과를 DQ 프로파일로 생성한다.
 
-``CHECK_FAILED``는 검사 과정에서 필요한 근거가 불완전하거나
-내부적으로 일관되지 않음을 의미하며,
-데이터셋 자체나 파이프라인 실행이 실패했다는 의미는 아니다.
+``CHECK_FAILED``는 행 추적 검증 또는 행 수 대사가 통과하지 못했음을 뜻한다.
+형변환 근거의 누락, NULL·중복·needs_review 관찰값만으로 이 상태를 결정하지 않는다.
+DQ 상태 자체는 파이프라인 실행을 중단하지 않지만 processor 등의 예외는 전파된다.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ class DQProfileResult:
     column_profiles: dict[str, ColumnProfile] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
-        """Return a JSON-friendly representation for logs or future storage."""
+        """Return a JSON-friendly representation for audit logs and monitoring storage."""
 
         def serialize(value: Any) -> Any:
             if isinstance(value, Enum):
@@ -841,7 +841,7 @@ def calculate_needs_review_metrics(
     *,
     review_reason_row_ids: Mapping[str, Iterable[object]] | None = None,
 ) -> NeedsReviewMetrics:
-    """Preserve the existing boolean while allowing future reason counts."""
+    """Count needs_review rows and unique row IDs for each supplied review reason."""
 
     if "needs_review" in processed.columns:
         rows_needing_review = int(processed["needs_review"].fillna(False).sum())
@@ -1054,7 +1054,7 @@ def profile_processor_run(
     dedup_keys: Iterable[str] | None = None,
     removal_reasons: Mapping[str, Iterable[object]] | None = None,
 ) -> tuple[pd.DataFrame, DQProfileResult]:
-    """Run a processor with row tracking and return a persistence-safe frame."""
+    """Run a processor with row tracking; return a lineage-free frame and its DQ profile."""
 
     lineaged_raw = add_stable_lineage(raw)
     normalized = normalizer(lineaged_raw)

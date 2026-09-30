@@ -1,9 +1,5 @@
-"""Request-time feasibility from verified processed.public_open_facility columns.
+"""정제된 시설 데이터를 기반으로 운영시간 등 추천에 사용할 시설 이용 가능성 정보를 생성합니다."""
 
-No scores, DB writes, or inferred facility IDs. Prefer existing recommendation
-travel_time; an explicit test origin enables the reference distance estimate.
-Availability describes the published schedule, not booking or live occupancy.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass

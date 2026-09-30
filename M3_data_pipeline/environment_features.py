@@ -1,10 +1,8 @@
-"""Processed-only request-time evidence; no persistence or external services.
+"""추천에 사용할 날씨·대기질 환경 정보를 정제 데이터에서 조회합니다.
 
-Weather uses the facility's coordinates in the KMA DFS grid. Air has no station
-coordinates: the fallback is explicitly a provincial proxy, not nearest-site
-exposure. Thresholds mirror the reference service's existing environmental
-flags; they are configurable recommendation policy, not medical guarantees.
+시설 위치를 기준으로 날씨 정보를 조회하고, 대기질은 지역 단위 정보를 활용합니다.
 """
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import math
