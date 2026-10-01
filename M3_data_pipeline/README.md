@@ -5,31 +5,34 @@ M3 데이터 파이프라인
 1. Architecture
 ```text
 공공데이터 API
-      ↓
-   Collector
-      ↓
+      ↓
+   Collector
+      ↓
 API 응답 / 결과코드 확인
-      ↓
-PostgreSQL RAW ───────────────────┐
-                                  │
-문화빅데이터 플랫폼                  │
-        ↓                         │
-Selenium 크롤링                    │
-        ↓                         │
-CSV 다운로드 시 PostgreSQL COPY  ───┘
-                            ↓
-                 Cleaning / Transformation
-                            ↓
-                           DQ
-                            ↓
-                 PostgreSQL PROCESSED
-                            ↓
-                         Backend
+      ↓
+PostgreSQL RAW
+
+문화빅데이터 플랫폼
+      ↓
+   Selenium 크롤링
+      ↓
+CSV 다운로드 시 PostgreSQL COPY
+      ↓
+PostgreSQL RAW
+      ↓
+Cleaning / Transformation
+      ↓
+     DQ
+      ↓
+PostgreSQL PROCESSED
+      ↓
+Backend
+
 Pipeline Execution
-      │
-      ├── Log Files
-      ├── monitoring.pipeline_run_history
-      └── Discord Webhook
+      │
+      ├── Log Files
+      ├── monitoring.pipeline_run_history
+      └── Discord Webhook
 ```
 | Schema | 역할 |
 | --- | --- |
@@ -37,6 +40,7 @@ Pipeline Execution
 | `processed` | 정제된 데이터 |
 | `monitoring` | 파이프라인 실행 및 품질검사 이력 |
 | `derived` | 서비스에 활용할 파생변수 저장 영역 |
+| `interaction` | 추천·검색·챗봇 등 서비스 이용 과정에서 발생하는 사용자 상호작용 데이터 저장 영역 |
 ---
 2. 데이터 수집 자동화
 2.1 공공데이터 API 수집
@@ -48,6 +52,8 @@ HTTP 200 응답만으로 정상 수집을 판단하지 않고 데이터 소스�
 상태, API 결과코드, JSON/XML 응답 형식 등을 확인합니다. 이를 통해 HTTP
 요청 자체는 성공했지만 API 내부에서 오류가 발생한 경우와 정상적인 응답을
 구분합니다.
+<br>
+🎥 [API 수집 시연 영상 보기](docs/videos/api_run_all_once.mp4)
 
 2.2 문화빅데이터 Selenium 크롤링
 API로 제공되지 않는 문화빅데이터는 Selenium 기반 웹 크롤링을 통해 CSV 다운로드 과정을 자동화합니다.
@@ -59,6 +65,8 @@ CSV 다운로드 시 PostgreSQL COPY
 ↓
 RAW
 대용량 CSV 적재에는 PostgreSQL COPY를 사용하여 행 단위 INSERT 방식의 적재 부담을 줄였습니다.
+<br>
+🎥 [Selenium 크롤링 시연 영상 보기](docs/videos/selenium_crawling_demo.mp4)
 
 ---
 3. 예외처리 및 장애 복구
@@ -204,6 +212,10 @@ Pipeline SUCCESS ≠ Data Quality PASS
 Row Tracking과 Row Count Reconciliation을 통해 설명되지 않는 행 손실이나
 추적 이상 여부를 확인하고, NULL 변화와 Column Profile 등의 정보를 함께
 기록하여 문제 원인을 추적합니다.
+<br>
+<br>
+<img src="docs/images/dq_audit.png" alt="DQ Audit 실행 결과" width="900">
+
 ---
 6. PROCESSED 데이터 적재
 정제·품질검사(DQ)를 거친 데이터를 PostgreSQL processed 스키마에
@@ -248,6 +260,14 @@ Row Tracking과 Row Count Reconciliation을 통해 설명되지 않는 행 손�
 | AED 빈 값 | 33건 | NULL 33건 | 의미상 결측값을 NULL로 표준화 |
 | AED 자료형 변환 신규 NULL | 0건 | 0건 | 변환에 따른 값 손실 없음 |
 | AED Row Tracking 이상 | 0건 | 0건 | 누락·미확인·중복 ID 없음 |
+7.3 데이터 파이프라인 성능 지표
+| 지표 | 결과 |
+| --- | ---: |
+| 데이터 처리·반영률 | **98.17%** |
+| 정제 과정 제외율 | **1.83%** |
+| 품질 확인 필요 비율 | **8.03%** |
+| 건수 대조 일치율 | **100.00%** |
+
 ---
 8. 스케줄링 및 운영 자동화
 8.1 APScheduler 기반 자동 실행
@@ -382,3 +402,4 @@ Audit
 - 데이터셋별 DQ 기준 고도화
 - 신규 데이터셋 수집기 생성 이후 공통 ELT·DQ·스케줄 연결 자동화
 - 서비스에 활용할 파생변수 검증 및 추천 서비스 활용 고도화
+- 추천·검색·챗봇 등 서비스 이용 과정에서 발생하는 사용자 상호작용 데이터 축적 및 향후 추천·분석 활용
