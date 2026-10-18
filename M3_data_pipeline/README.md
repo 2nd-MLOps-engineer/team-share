@@ -59,8 +59,6 @@ HTTP 200 응답만으로 정상 수집을 판단하지 않고 데이터 소스�
 상태, API 결과코드, JSON/XML 응답 형식 등을 확인합니다. 이를 통해 HTTP
 요청 자체는 성공했지만 API 내부에서 오류가 발생한 경우와 정상적인 응답을
 구분합니다.
-<br>
-🎥 [API 수집 시연 영상 보기](docs/videos/api_run_all_once.mp4)
 
 ### 2.2 문화빅데이터 Selenium 크롤링
 
@@ -75,8 +73,6 @@ CSV 다운로드 시 PostgreSQL COPY
 RAW
 ```
 대용량 CSV 적재에는 PostgreSQL COPY를 사용하여 행 단위 INSERT 방식의 적재 부담을 줄였습니다.
-<br>
-🎥 [Selenium 크롤링 시연 영상 보기](docs/videos/selenium_crawling_demo.mp4)
 
 ---
 
