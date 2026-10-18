@@ -17,49 +17,31 @@ from pipeline_elt import upsert_raw_dataset_group
 
 
 # ==================================================
-# 1. 프로젝트 경로 설정
+# 1. Project Path Configuration
 # ==================================================
 
-# 현재 파일:
-# team-share/M3_data_pipeline/collector/weather.py
-#
-# parents[2] = team-share
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CURRENT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = CURRENT_DIR.parent
 
 # ==================================================
-# 2. .env 파일 자동 탐색
+# 2. Environment Configuration
 # ==================================================
 
 ENV_CANDIDATES = [
+    CURRENT_DIR / ".env",
     PROJECT_ROOT / ".env",
-    PROJECT_ROOT / "M3_data_pipeline" / ".env",
-    Path(__file__).resolve().parent / ".env",
 ]
 
-ENV_PATH = None
-
-for path in ENV_CANDIDATES:
-    if path.exists():
-        ENV_PATH = path
-        break
-
-if ENV_PATH is None:
-    raise FileNotFoundError(
-        ".env 파일을 찾을 수 없습니다."
-    )
-
-
-# ==================================================
-# 3. 환경변수 로드
-# ==================================================
-
-load_dotenv(
-    dotenv_path=ENV_PATH,
-    override=False
-)
+ENV_PATH = next((path for path in ENV_CANDIDATES if path.exists()), None)
+if ENV_PATH:
+    load_dotenv(dotenv_path=ENV_PATH, override=False)
 
 API_KEY_RAW = os.getenv("WEATHER_API_KEY")
+if not API_KEY_RAW:
+    raise EnvironmentError(
+        "WEATHER_API_KEY is not configured in the active environment. "
+        "Please provide authorized credentials."
+    )
 
 print("=" * 60)
 print("환경변수 확인")

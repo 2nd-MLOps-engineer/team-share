@@ -27,27 +27,28 @@ from jsonl_checkpoint import (
 
 
 # --------------------------------------------------
-# 1. 환경변수 / 기본 설정
+# 1. Environment & Runtime Configuration
 # --------------------------------------------------
 
-# 현재 파일:
-# team-share/M3_data_pipeline/collector/facility_api_v2.py
-#
-# ROOT_DIR:
-# team-share/
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = Path(__file__).resolve().parents[1]
 CHECKPOINT_PATH = (
     ROOT_DIR / "data" / "raw" / "facility" / "facility_checkpoint.jsonl"
 )
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
+if not ENV_PATH.exists():
+    ENV_PATH = ROOT_DIR / ".env"
 
-load_dotenv(ENV_PATH)
+if ENV_PATH.exists():
+    load_dotenv(ENV_PATH, override=False)
 
 RAW_KEY = os.getenv("FACILITY_API_KEY")
 
 if not RAW_KEY:
-    raise ValueError("FACILITY_API_KEY가 .env에 없습니다.")
+    raise EnvironmentError(
+        "FACILITY_API_KEY is not configured in the active environment. "
+        "Please provide valid credentials via .env or container secrets."
+    )
 
 SERVICE_KEY = unquote(RAW_KEY)
 

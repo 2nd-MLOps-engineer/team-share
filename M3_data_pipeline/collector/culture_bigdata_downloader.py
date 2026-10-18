@@ -47,7 +47,7 @@ DETAIL_URLS = (
     f"{BASE_URL}/bigdata/user/data_market/detail.do"
     "?id=2b1c565d-5f37-4152-966d-5f8094f8cf33",
 )
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DOWNLOAD_DIR = PROJECT_ROOT / "data" / "raw" / "culture_bigdata"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "data" / "logs"
 DEFAULT_PROFILE_DIR = PROJECT_ROOT / "data" / "browser_profiles" / "culture_bigdata"

@@ -12,37 +12,30 @@ from sqlalchemy import create_engine, text
 
 
 # ============================================================
-# 1. PATH
+# 1. PATH & Environment
 # ============================================================
 
 CURRENT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 ENV_PATH = CURRENT_DIR / ".env"
-
-
-# ============================================================
-# 2. ENV
-# ============================================================
-
 if not ENV_PATH.exists():
-    raise FileNotFoundError(
-        f".env 파일을 찾을 수 없습니다.\n"
-        f"확인 경로: {ENV_PATH}"
-    )
+    ENV_PATH = PROJECT_ROOT / ".env"
 
-load_dotenv(ENV_PATH, override=True)
+if ENV_PATH.exists():
+    load_dotenv(ENV_PATH, override=True)
 
 
 # ------------------------------------------------------------
-# API KEY
+# API KEY Guard
 # ------------------------------------------------------------
 
 RAW_API_KEY = os.getenv("DURUNUBI_API_KEY")
 
 if not RAW_API_KEY:
-    raise ValueError(
-        "DURUNUBI_API_KEY가 .env에 없습니다."
+    raise EnvironmentError(
+        "DURUNUBI_API_KEY is not configured in the active environment. "
+        "Please provide authorized credentials."
     )
 
 SERVICE_KEY = unquote(RAW_API_KEY)

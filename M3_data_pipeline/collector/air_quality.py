@@ -23,45 +23,32 @@ from pipeline_elt import upsert_raw_dataset_group
 # =========================================================
 
 CURRENT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = CURRENT_DIR.parent.parent
+PROJECT_ROOT = CURRENT_DIR.parent
 
 # =========================================================
-# 2. ENV 파일 찾기
+# 2. Environment Configuration
 # =========================================================
 
 ENV_CANDIDATES = [
     CURRENT_DIR / ".env",
-    PROJECT_ROOT / "M3_data_pipeline" / "collector.env",
-    CURRENT_DIR / "collector.env",
     PROJECT_ROOT / ".env",
+    CURRENT_DIR / "collector.env",
 ]
 
-ENV_FILE = None
-
-for candidate in ENV_CANDIDATES:
-    if candidate.exists():
-        ENV_FILE = candidate
-        break
-
-if ENV_FILE is None:
-    raise FileNotFoundError(
-        ".env 또는 collector.env 파일을 찾을 수 없습니다."
-    )
-
-load_dotenv(ENV_FILE, override=False)
-
-print("ENV 파일:", ENV_FILE)
+ENV_FILE = next((candidate for candidate in ENV_CANDIDATES if candidate.exists()), None)
+if ENV_FILE:
+    load_dotenv(ENV_FILE, override=False)
 
 
 # =========================================================
-# 3. API KEY
+# 3. API KEY Guard
 # =========================================================
 
 API_KEY_RAW = os.getenv("AIRKOREA_API_KEY")
 
 if not API_KEY_RAW:
-    raise ValueError(
-        "AIRKOREA_API_KEY가 ENV 파일에 없습니다."
+    raise EnvironmentError(
+        "AIRKOREA_API_KEY is not configured. Please supply authorized credentials via .env or container environment."
     )
 
 API_KEY = unquote(API_KEY_RAW)

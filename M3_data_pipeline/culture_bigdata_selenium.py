@@ -1,20 +1,19 @@
 """문화 빅데이터 플랫폼 CSV 다운로드 및 PostgreSQL raw 적재 자동화.
 
-``collector/.env``의 ``CULTURE_ID``와 ``CULTURE_PASSWORD``로 로그인한 뒤,
-상품 상세 페이지에서 CSV 배포 파일만 선택하고 활용목적/필수약관 팝업을
-처리한다. 다운로드한 원본은 수정하지 않고 스트리밍으로 검증한 뒤
-``woosimwoonkka`` 데이터베이스의 ``raw`` 스키마에 원자적으로 교체 적재한다.
-운영 다운로드는 최종 DB 검증 후 삭제하며 ``--keep-downloads``와
-``--load-only``로 원본 보존/재적재가 가능하다. 정제와 ``processed`` 적재는
-공통 generic pipeline이 담당한다.
+환경변수(KMS/.env)의 ``CULTURE_ID``와 ``CULTURE_PASSWORD``로 세션을 획득한 뒤,
+상품 상세 페이지에서 CSV 배포 파일만 선택하고 동적 모달/필수약관 팝업을
+원자적으로 제어한다. 다운로드한 원본은 수정 없이 인메모리 스트리밍으로 검증한 뒤
+PostgreSQL 데이터베이스의 ``raw`` 스키마에 원자적(COPY Bulk Load)으로 교체 적재한다.
+운영 다운로드는 최종 DB 검증 후 즉시 파기하며 ``--keep-downloads``와
+``--load-only``로 원본 보존/재적재가 가능하다. 적재 완료 후 16-Rule DQ 감사를 전수 트리거한다.
 
 기본 실행은 설정된 상품을 차례대로 내려받는다::
 
-    python M3_data_pipeline/culture_bigdata_selenium.py
+    python culture_bigdata_selenium.py
 
 특정 상품만 실행하려면 ``--url``을 지정한다::
 
-    python M3_data_pipeline/culture_bigdata_selenium.py --url "https://..."
+    python culture_bigdata_selenium.py --url "https://..."
 """
 
 from __future__ import annotations

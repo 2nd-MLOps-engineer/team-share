@@ -33,15 +33,11 @@ from pipeline_elt import replace_raw_dataset_group
 # ============================================================
 
 CURRENT_DIR = Path(__file__).resolve().parent
-
-# 이 파일을 M3_data_pipeline/collector 안에 두는 현재 프로젝트 구조 기준
-PROJECT_ROOT = (
-    Path(__file__).resolve().parents[2]
-    if len(Path(__file__).resolve().parents) >= 3
-    else CURRENT_DIR
-)
+PROJECT_ROOT = CURRENT_DIR.parent
 
 ENV_PATH = CURRENT_DIR / ".env"
+if not ENV_PATH.exists():
+    ENV_PATH = PROJECT_ROOT / ".env"
 
 if ENV_PATH.exists():
     load_dotenv(ENV_PATH, override=False)

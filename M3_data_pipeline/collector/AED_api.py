@@ -29,14 +29,21 @@ from jsonl_checkpoint import (
 )
 
 CURRENT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = CURRENT_DIR / ".env"
+if not ENV_PATH.exists():
+    ENV_PATH = PROJECT_ROOT / ".env"
 CHECKPOINT_PATH = PROJECT_ROOT / "data" / "raw" / "aed" / "aed_checkpoint.jsonl"
 
-load_dotenv(ENV_PATH, override=False)
+if ENV_PATH.exists():
+    load_dotenv(ENV_PATH, override=False)
+
 RAW_KEY = os.getenv("AED_API_KEY")
 if not RAW_KEY:
-    raise ValueError("AED_API_KEY가 .env에 없습니다.")
+    raise EnvironmentError(
+        "AED_API_KEY is not configured in the active environment. "
+        "Please provide authorized credentials."
+    )
 SERVICE_KEY = unquote(RAW_KEY)
 
 URL = (
