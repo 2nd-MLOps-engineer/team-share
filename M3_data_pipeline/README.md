@@ -7,35 +7,41 @@
 ## 1. Architecture
 
 ```text
-공공데이터 API
-      ↓
-   Collector
-      ↓
-API 응답 / 결과코드 확인
-      ↓
-PostgreSQL RAW
+ [공공데이터 API (11개 데이터셋)]            [문화빅데이터 플랫폼 (8개 데이터셋)]
+               │                                            │
+      (Open API Collector)                         (Selenium Headless)
+               │                                            │
+    가짜 200 탐지 · Backoff Retry                 동적 세션/팝업제어 · CSV 스트리밍
+  전수 건수 대조 & JSONL 체크포인트 복구                        │
+               │                                            │
+  [JSON/XML 파싱 ➔ Staging 적재]               [PostgreSQL COPY ➔ Staging 적재]
+               │                                            │
+               └─────────────────────┬──────────────────────┘
+                                     │
+                      (Staging 원자적 격리 검증 ➔ RAW 반영)
+                                     │
+                                     ▼
 
-문화빅데이터 플랫폼
-      ↓
-   Selenium 크롤링
-      ↓
-CSV 다운로드 시 PostgreSQL COPY
-      ↓
-PostgreSQL RAW
-      ↓
-Cleaning / Transformation
-      ↓
-     DQ
-      ↓
-PostgreSQL PROCESSED
-      ↓
-Backend
+ ┌────────────────────────────────────────────────────────────────────────────┐
+ │                               PostgreSQL DB                                │
+ │                                                                            │
+ │  ┌───────────────────────────────┐      ┌───────────────────────────────┐  │
+ │  │          schema: raw          │      │       schema: processed       │  │
+ │  │ - 수집 원천 데이터 보존        │      │ - 16개 규칙 기반 DQ 정제 완료  │  │
+ │  │ - 감사 및 장애 재현 기준점     │      │ - 서비스 서빙 최적화          │  │
+ │  └───────────────────────────────┘      └───────────────────────────────┘  │
+ │                                  │                      ▲                  │
+ │                                  └── Cleaning / DQ ─────┘                  │
+ └────────────────────────────────────────────────────────────────────────────┘
+                                     │
+                                     ▼
+                            FastAPI Backend Serving
 
-Pipeline Execution
-      │
-      ├── Log Files
-      ├── monitoring.pipeline_run_history
-      └── Discord Webhook
+ Pipeline Execution
+       │
+       ├── Log Files (일일 수집/정제 감사 로그)
+       ├── monitoring.pipeline_run_history (실행 상태 및 소요시간 기록)
+       └── Discord Webhook (일일 요약 브리핑 & 장애 즉시 알림)
 ```
 | Schema | 역할 |
 | --- | --- |
@@ -53,8 +59,7 @@ Pipeline Execution
 
 기상, 대기질, AED, 체육시설, 두루누비, 자전거 사고다발지역 등의
 공공데이터를 API를 통해 수집합니다.
-일반 API 데이터는 중간 CSV 저장과 재읽기를 거치지 않고 PostgreSQL
-`raw` 스키마에 직접 적재합니다.
+일반 API 데이터는 임시 Staging 테이블에 1차 적재한 후 원자적 격리 검증을 거쳐 PostgreSQL `raw` 스키마에 안전하게 반영합니다.
 HTTP 200 응답만으로 정상 수집을 판단하지 않고 데이터 소스에 따라 HTTP
 상태, API 결과코드, JSON/XML 응답 형식 등을 확인합니다. 이를 통해 HTTP
 요청 자체는 성공했지만 API 내부에서 오류가 발생한 경우와 정상적인 응답을
@@ -65,12 +70,16 @@ HTTP 200 응답만으로 정상 수집을 판단하지 않고 데이터 소스�
 API로 제공되지 않는 문화빅데이터는 Selenium 기반 웹 크롤링을 통해 CSV 다운로드 과정을 자동화합니다.
 ```text
 문화빅데이터 플랫폼
-      ↓
-Selenium 크롤링
-      ↓
-CSV 다운로드 시 PostgreSQL COPY
-      ↓
-RAW
+      │
+Selenium 헤드리스 크롤링
+      │
+CSV 다운로드 스트리밍
+      │
+PostgreSQL COPY ➔ Staging 적재
+      │
+Staging 원자적 격리 검증
+      │
+PostgreSQL RAW
 ```
 대용량 CSV 적재에는 PostgreSQL COPY를 사용하여 행 단위 INSERT 방식의 적재 부담을 줄였습니다.
 
