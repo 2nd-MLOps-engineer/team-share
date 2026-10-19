@@ -11,7 +11,7 @@
                │                                            │
       (Open API Collector)                         (Selenium Headless)
                │                                            │
-    가짜 200 탐지 · Backoff Retry                 동적 세션/팝업제어 · CSV 스트리밍
+    가짜 200 탐지 · 자동 재시도                 동적 세션/팝업제어 · CSV 스트리밍
   전수 건수 대조 & JSONL 체크포인트 복구                        │
                │                                            │
   [JSON/XML 파싱 ➔ Staging 적재]               [PostgreSQL COPY ➔ Staging 적재]
